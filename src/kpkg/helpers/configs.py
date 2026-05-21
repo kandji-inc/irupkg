@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 # Created 01/16/24; NRJA
 # Updated 02/20/24; NRJA
 ################################################################################################
 # License Information
 ################################################################################################
 #
-# Copyright 2024 Kandji, Inc.
+# Copyright 2026 Iru, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this
 # software and associated documentation files (the "Software"), to deal in the Software
@@ -32,17 +31,41 @@
 import json
 import logging
 import os
+import platform
 import plistlib
 import re
 import sys
 
 import requests
 
+from .utils import HTTP_TIMEOUT, env_keystore_enabled
+
 ###########################
 ######### LOGGING #########
 ###########################
 
 log = logging.getLogger(__name__)
+
+
+def build_default_config(api_url: str, token_name: str, use_env: bool = True, use_keychain: bool = False) -> dict:
+    """Return a minimal valid kpkg config dict with sensible defaults.
+    Single source of truth shared by _read_config() and run_setup()."""
+    return {
+        "kandji": {"api_url": api_url, "token_name": token_name},
+        "token_keystore": {"environment": use_env, "keychain": use_keychain},
+        "li_enforcement": {"delays": {"prod": 5, "test": 0}, "type": "audit_enforce"},
+        "slack": {"enabled": False, "webhook_name": "SLACK_TOKEN"},
+        "use_package_map": False,
+        "zz_defaults": {
+            "auto_create_app": True,
+            "dry_run": False,
+            "dynamic_lookup": False,
+            "new_app_naming": "APPNAME (kpkg)",
+            "self_service_category": "Apps",
+            "test_self_service_category": "Utilities",
+            "unzip_location": "/Applications",
+        },
+    }
 
 
 class Configurator:
@@ -76,14 +99,26 @@ class Configurator:
         # Have to derive path this way in order to get the execution file origin
         kandji_conf_path = os.path.join(self.parent_dir, kandji_conf)
         if not os.path.exists(kandji_conf_path):
-            log.fatal(f"kpkg config not found at '{kandji_conf_path}'! Validate its existence and try again")
-            sys.exit(1)
+            api_url = os.environ.get("KANDJI_API_URL", "")
+            if not api_url:
+                log.fatal(
+                    f"kpkg config not found at '{kandji_conf_path}'! "
+                    "Run 'kpkg --setup' to generate it, or set KANDJI_API_URL and KANDJI_TOKEN in the environment and try again"
+                )
+                sys.exit(1)
+            token_name = os.environ.get("KANDJI_TOKEN_NAME", "KANDJI_TOKEN")
+            auto_config = build_default_config(api_url, token_name)
+            os.makedirs(os.path.dirname(kandji_conf_path), exist_ok=True)
+            with open(kandji_conf_path, "w") as f:
+                json.dump(auto_config, f, indent=2, sort_keys=True)
+            log.info(f"Auto-generated config at '{kandji_conf_path}' from environment variables")
+            return auto_config
         try:
             with open(kandji_conf_path) as f:
                 custom_config = json.loads(f.read())
         except ValueError as ve:
             log.fatal(
-                f"Config at '{kandji_conf_path}' is not valid JSON!\n{ve} — validate file integrity for '{kandji_conf}' and try again"
+                f"Config at '{kandji_conf_path}' is not valid JSON!\n{ve} -- validate file integrity for '{kandji_conf}' and try again"
             )
             sys.exit(1)
         return custom_config
@@ -98,6 +133,7 @@ class Configurator:
         # Initialize vars
         self.package_map = None
         self.app_names = {}
+        self.map_unzip_location = None
         if self.kpkg_config.get("use_package_map") is True:
             self.package_map = self._read_config(self.package_map_file)
             if self.package_map is False:
@@ -116,6 +152,7 @@ class Configurator:
                 log.info("Will use defaults if no args passed")
         self.map_ss_category = self.app_names.get("ss_category")
         self.map_test_category = self.app_names.get("test_category")
+        self.map_unzip_location = self.app_names.pop("unzip_location", None)
 
         # Once assigned, remove from dict
         # This ensures we're only iterating over app names
@@ -138,6 +175,7 @@ class Configurator:
             self.default_dynamic_lookup = default_vals.get("dynamic_lookup")
             self.default_ss_category = default_vals.get("self_service_category")
             self.test_default_ss_category = default_vals.get("test_self_service_category")
+            self.default_unzip_location = default_vals.get("unzip_location", "/Applications")
 
         config_enforcement = self.kpkg_config.get("li_enforcement")
         enforcement_type = self._parse_enforcement(config_enforcement.get("type"))
@@ -147,9 +185,7 @@ class Configurator:
             "no_enforcement"
             if (self.map_ss_category or self.arg_ss_category or self.map_test_category or self.arg_test_category)
             is not None
-            else enforcement_type
-            if enforcement_type
-            else "install_once"
+            else enforcement_type or "install_once"
         )
         # Assign enforcement delays for audits
         if config_enforcement.get("delays"):
@@ -160,6 +196,13 @@ class Configurator:
         if (self.arg_dry_run or self.default_dry_run) is True:
             log.info("DRY RUN: Will not make any Custom App modifications!\n\n\n")
             self.dry_run = True
+
+        self.unzip_location = (
+            self.arg_unzip_location
+            or self.map_unzip_location
+            or getattr(self, "default_unzip_location", None)
+            or "/Applications"
+        )
 
     def _set_custom_name(self):
         """Sets and populates self.app_names dict for later iter"""
@@ -191,7 +234,7 @@ class Configurator:
             """Queries all Self Service categories from Kandji tenant; assigns GET URL to var for cURL execution
             Runs command and validates output when returning self._validate_response()"""
             get_url = f"{self.kandji_api_prefix}/self-service/categories"
-            response = requests.get(url=get_url, headers=self.auth_headers)
+            response = requests.get(url=get_url, headers=self.auth_headers, timeout=HTTP_TIMEOUT)
             return self._validate_response(response, "get_selfservice")
 
         def name_to_id(ss_name, ss_type):
@@ -255,11 +298,12 @@ class Configurator:
         """Checks if Slack token name is in config
         Looks up webhook and assigns for use in self.slack_notify()"""
 
-        # Check Slack setting and get/assign webhook
-        slack_token_name = (
-            self.kandji_slack_opts.get("webhook_name") if self.kandji_slack_opts.get("enabled") is True else None
-        )
-        self.slack_channel = self._retrieve_token(slack_token_name) if slack_token_name is not None else None
+        slack_token_name = self.kandji_slack_opts.get("webhook_name", "SLACK_TOKEN")
+        # Auto-enable Slack when the webhook token is present in ENV (mirrors ENV_KEYSTORE behaviour)
+        if not self.kandji_slack_opts.get("enabled") and self.token_keystores.get("environment"):
+            if os.environ.get(slack_token_name) or os.environ.get(slack_token_name.upper()):
+                self.kandji_slack_opts["enabled"] = True
+        self.slack_channel = self._retrieve_token(slack_token_name) if self.kandji_slack_opts.get("enabled") else None
 
     def _set_kandji_config(self):
         """Validates provided Kandji API URL is valid for use
@@ -274,12 +318,15 @@ class Configurator:
             "gateway.kandji.io/main-backend/app/v1/company/auth-migration-status",
         )
         try:
-            response = requests.get(url=migration_check_url, headers=self.headers)
+            response = requests.get(url=migration_check_url, headers=self.headers, timeout=HTTP_TIMEOUT)
             migration_data = response.json()
         except (requests.RequestException, ValueError):
             migration_data = {}
 
-        if "tenantNotFound" in str(migration_data.values()):
+        # Match the structured error code rather than a substring of stringified values;
+        # otherwise a proxy error page or unrelated field that mentions "tenantNotFound"
+        # hard-exits the process.
+        if migration_data.get("error") == "tenantNotFound" or migration_data.get("code") == "tenantNotFound":
             log.fatal(f"ERROR: Provided Kandji URL {self.kandji_api_url} appears invalid! Cannot upload...")
             sys.exit(1)
 
@@ -299,11 +346,18 @@ class Configurator:
         kandji_token = self._retrieve_token(self.kandji_token_name)
         if kandji_token is None:
             log.fatal(
-                f"ERROR: Could not retrieve token value from key {self.kandji_token_name}! Run 'kpkg-setup' and try again"
+                f"ERROR: Could not retrieve token value from key {self.kandji_token_name}! Run 'kpkg --setup' and try again"
             )
             sys.exit(1)
-        # Set headers/params for API calls
-        self.auth_headers = {"Authorization": f"Bearer {kandji_token}", "Content-Type": "application/json"}
+        # Set headers/params for API calls. Cache-Control hints discourage any
+        # intermediate CDN/proxy from returning a stale custom-app record after
+        # we PATCH it -- observed read-after-write inconsistency from Kandji.
+        self.auth_headers = {
+            "Authorization": f"Bearer {kandji_token}",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
         self.params = {"source": "kpkg"}
 
     ####################################
@@ -313,62 +367,103 @@ class Configurator:
     def get_install_media_metadata(self, lookup_again=False):
         """Populates PKG path and name, and validates file type
         to ensure either DMG or PKG is provided
-        If DMG, runs diskutil image info to get volume name
-        If PKG, runs installer pkginfo to get PKG name
+        If DMG, runs diskutil image info to get volume name (macOS only)
+        If PKG, runs installer pkginfo to get PKG name (macOS) or libarchive probe (Linux)
         Supports optional arg to re-trigger lookup of PKG if found in DMG
         If found, overrides app name to use PKG value vs. DMG"""
         self.pkg_path = self.pkg_path or self.arg_pkg_path
         self.pkg_name = os.path.basename(self.pkg_path)
-        # Subproc call to determine media type and validity
-        if self._run_command(f"hdiutil imageinfo -format '{self.pkg_path}'", nostderr=True) is not False:
+
+        def _is_dmg_file(path):
+            """Returns True if path is a DMG."""
+            if platform.system() != "Darwin":
+                return path.lower().endswith(".dmg")
+            return self._run_command(f"hdiutil imageinfo -format '{path}'", nostderr=True) is not False
+
+        def _is_pkg_file(path):
+            """Returns True if path is a valid .pkg (XAR archive). Linux-safe."""
+            if platform.system() == "Darwin":
+                return self._run_command(f"installer -pkginfo -pkg '{path}'", nostderr=True) is not False
+            try:
+                with open(path, "rb") as f:
+                    return f.read(4) == b"xar!"
+            except OSError:
+                return False
+
+        def _is_zip_file(path):
+            """Returns True if path is a ZIP archive (magic bytes PK\\x03\\x04)."""
+            try:
+                with open(path, "rb") as f:
+                    return f.read(4) == b"PK\x03\x04"
+            except OSError:
+                return False
+
+        if _is_dmg_file(self.pkg_path):
             self.install_type = "image"
-        elif self._run_command(f"installer -pkginfo -pkg '{self.pkg_path}'", nostderr=True) is not False:
+        elif _is_pkg_file(self.pkg_path):
             self.install_type = "package"
+        elif _is_zip_file(self.pkg_path):
+            self.install_type = "zip"
         else:
-            unsupported_type = self._run_command(f"file --mime-type -b {self.pkg_path}")
+            unsupported_type = self._run_command(f"file --mime-type -b '{self.pkg_path}'")
             log.error(f"File '{self.pkg_name}' is unsupported type '{unsupported_type}'")
             log.error(f"Confirm '{self.pkg_path}' is valid package/disk image")
             log.error(f"Skipping '{self.pkg_name}'...")
             raise OSError
         if self.install_type == "image":
-            shell_cmd = f"diskutil image info -plist '{self.pkg_path}'"
-            diskutil_out = self._run_command(shell_cmd, nostderr=True)
-            if diskutil_out is False:
-                log.warning("Could not retrieve diskutil info for provided DMG")
-                log.warning("Pending EULA may be blocking mount or invalid DMG")
-                self.install_name = None
+            if platform.system() == "Darwin":
+                shell_cmd = f"diskutil image info -plist '{self.pkg_path}'"
+                diskutil_out = self._run_command(shell_cmd, nostderr=True)
+                if diskutil_out is False:
+                    log.warning("Could not retrieve diskutil info for provided DMG")
+                    log.warning("Pending EULA may be blocking mount or invalid DMG")
+                    self.install_name = None
+                else:
+                    diskutil_plist_out = plistlib.loads(diskutil_out.encode())
+                    self.install_name = next(
+                        disk.get("volume-name")
+                        for disk in diskutil_plist_out.get("Partitions")
+                        if "N/A" not in disk.get("volume-name")
+                    )
             else:
-                diskutil_plist_out = plistlib.loads(diskutil_out.encode())
-                self.install_name = next(
-                    disk.get("volume-name")
-                    for disk in diskutil_plist_out.get("Partitions")
-                    if "N/A" not in disk.get("volume-name")
-                )
+                self.install_name = None
         elif self.install_type == "package":
-            # Subproc call to get PKG name
-            shell_cmd = f"installer -pkginfo -pkg '{self.pkg_path}'"
-            pkginfo_out = self._run_command(shell_cmd)
-            try:
-                pkginfo_out = pkginfo_out.splitlines()[0]
-            except (IndexError, AttributeError):
-                pass
-            self.install_name = pkginfo_out if pkginfo_out is not False else None
+            if platform.system() == "Darwin":
+                shell_cmd = f"installer -pkginfo -pkg '{self.pkg_path}'"
+                pkginfo_out = self._run_command(shell_cmd)
+                try:
+                    pkginfo_out = pkginfo_out.splitlines()[0]
+                except (IndexError, AttributeError):
+                    pass
+                self.install_name = pkginfo_out if pkginfo_out is not False else None
+            else:
+                self.install_name = None
+        elif self.install_type == "zip":
+            self.install_name = None
         # non-capture group matches on optional 64 char hex string
-        # capture matches one or more word and/or whitespace chars (non-greedy)
-        # non-capture positive lookahead assertion to indicate match will be found before version or dashes
-        name_only_pattern = re.compile(r"(?:[a-f0-9]{64}--)?([\w\s]+?)(?=\s+\d+\.\d+|[.-])")
+        # capture matches one or more word/whitespace/dash chars (non-greedy) so hyphenated
+        # app names like 'claude-devtools' survive intact
+        # lookahead stops at: an optional separator followed by a dotted version (e.g. -1.2, _7.0, 0.95),
+        # or at the trailing file extension (e.g. .dmg, .pkg, .zip)
+        name_only_pattern = re.compile(r"(?:[a-f0-9]{64}--)?([\w\s-]+?)(?=[\s_-]?\d+\.\d+|\.[a-zA-Z]+$)")
+        # Trailing architecture/platform suffixes that appear in upstream filenames but
+        # aren't part of the user-facing app name (case-insensitive)
+        arch_suffix_pattern = re.compile(r"[-_](aarch64|arm64|arm|x86_64|x86|amd64|intel|universal)$", re.IGNORECASE)
         if self.install_name:
             log.debug(f"regex searching {name_only_pattern} against {self.install_name}\nOutput is below:")
             # If PKG/DMG name found, strip out version and other metadata
             log.debug(re.search(name_only_pattern, self.install_name))
             try:
-                self.install_name = re.search(name_only_pattern, self.install_name).group(1)
+                self.install_name = re.search(name_only_pattern, self.install_name).group(1).rstrip("_")
+                self.install_name = arch_suffix_pattern.sub("", self.install_name)
             except AttributeError as err:
                 log.debug(f"Installer name {self.install_name} couldn't be filtered further; leaving unchanged\n{err}")
         # If no name returned from above, run PKG basename thru re filter to approximate a usable name
-        self.pkg_path_name = (
-            None if self.install_name else re.search(name_only_pattern, os.path.basename(self.pkg_path)).group(1)
-        )
+        if self.install_name:
+            self.pkg_path_name = None
+        else:
+            self.pkg_path_name = re.search(name_only_pattern, os.path.basename(self.pkg_path)).group(1).rstrip("_")
+            self.pkg_path_name = arch_suffix_pattern.sub("", self.pkg_path_name)
         if lookup_again is True:
             self._populate_package_map()
             self._set_defaults_enforcements()
@@ -398,14 +493,14 @@ class Configurator:
             # Overwrite Kandji API URL from ENV or keep as set in config
             self.kandji_api_url = os.environ.get("KANDJI_API_URL", self.kandji_api_url)
             # Overwrite keystore conf from ENV if set
-            if "ENV_KEYSTORE" in os.environ:
+            if env_keystore_enabled():
                 self.token_keystores["environment"] = True
             # Sanity check values before continuing
             if "TENANT" in self.kandji_api_url:
-                log.fatal("Kandji API URL is invalid! Run '/usr/local/bin/kpkg-setup' and try again")
+                log.fatal("Kandji API URL is invalid! Run 'kpkg --setup' and try again")
                 sys.exit(1)
-            if not any(self.token_keystores.values()):
-                log.fatal("Token keystore is undefined! Run '/usr/local/bin/kpkg-setup' and try again")
+            if not any(self.token_keystores.values()) and platform.system() == "Darwin":
+                log.fatal("Token keystore is undefined! Run 'kpkg --setup' and try again")
                 sys.exit(1)
             self.kandji_slack_opts = self.kpkg_config["slack"]
         except KeyError as err:

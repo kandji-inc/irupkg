@@ -1,0 +1,77 @@
+name: kpkg brew scheduler
+
+# Periodically refreshes Homebrew cask formulas and runs kpkg against the
+# casks listed in brew_cron.json, uploading any updated installer to Kandji.
+# Mirrors the docker-compose scheduler for environments where running a
+# long-lived container is not preferred.
+
+on:
+  # schedule:
+  #   # Every two hours. Adjust as needed; balance freshness vs CI minutes.
+  #   - cron: '0 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kpkg-brew-scheduler
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      KANDJI_API_URL: ${{ secrets.KANDJI_API_URL }}
+      KANDJI_TOKEN: ${{ secrets.KANDJI_TOKEN }}
+      SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+      # Keep config.json + audit_app_and_version.zsh resolution co-located
+      # with the checked-out source so kpkg doesn't try to read/write under $HOME.
+      KPKG_LOCAL_DIR: ${{ github.workspace }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install 7-Zip 26.01
+        # Stock 7z on ubuntu-latest is too old to extract modern Apple DMGs
+        # (UDIF + HFS+/APFS). Mirrors the same install used by the Docker image.
+        # Tarball sha256s are pinned so a compromised/mirrored 7-zip.org cannot
+        # silently swap the binary.
+        env:
+          SHA256_X64: 8ea0fc8a135e7b848e80a4116fe22dff56c8c4518dde1f43cce67f4e340b437a  # pragma: allowlist secret
+          SHA256_ARM64: 39f8c9070c300a63c7484d9a983119ef3edf841e1ddf69f1affae29fdec5f612  # pragma: allowlist secret
+        run: |
+          arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+          case "${arch}" in
+              x64)   expected_sha="${SHA256_X64}" ;;
+              arm64) expected_sha="${SHA256_ARM64}" ;;
+              *) echo "Unsupported arch: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/7z.tar.xz "https://www.7-zip.org/a/7z2601-linux-${arch}.tar.xz"
+          echo "${expected_sha}  /tmp/7z.tar.xz" | sha256sum -c -
+          sudo tar -xf /tmp/7z.tar.xz -C /usr/local/bin 7zz
+          sudo ln -sf /usr/local/bin/7zz /usr/local/bin/7z
+          rm /tmp/7z.tar.xz
+          7z --help | head -3
+
+      - name: Add Homebrew to PATH
+        run: |
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+
+      - name: Update Homebrew taps
+        # Without this, the runner's tap snapshot can be stale and brew will
+        # serve an outdated cask formula whose recorded sha differs from what
+        # upstream is currently serving, causing spurious re-uploads.
+        run: brew update
+
+      - name: Run kpkg against configured casks
+        run: |
+          casks=$(jq -r '.brew_casks | map("-b " + .) | join(" ")' brew_cron.json)
+          echo "Running: kpkg ${casks}"
+          # shellcheck disable=SC2086
+          uv run kpkg ${casks} 

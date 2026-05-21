@@ -63,7 +63,7 @@ body:
     attributes:
       label: kpkg version
       description: Output of `kpkg --version`
-      placeholder: "Kandji Packages: 1.0.1"
+      placeholder: "Kandji Packages: 2.0.0"
     validations:
       required: true
   - type: textarea

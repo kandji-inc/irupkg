@@ -5,7 +5,7 @@
 # License Information
 ################################################################################################
 #
-# Copyright 2024 Kandji, Inc.
+# Copyright 2026 Iru, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this
 # software and associated documentation files (the "Software"), to deal in the Software
@@ -69,9 +69,16 @@ config_name="config.json"
 # Hardcoded filename for configs
 config_file="${abs_dir}/${config_name}"
 
-# Find version file and assign
-version_path=$(find "${abs_dir}" -name VERSION)
-version=$(cat "${version_path}")
+# Resolve version: local VERSION file (dev/project root), then installed kpkg binary,
+# then find in src layout excluding build artifacts
+if [[ -f "${abs_dir}/VERSION" ]]; then
+    version=$(< "${abs_dir}/VERSION")
+elif command -v kpkg >/dev/null 2>&1; then
+    version=$(kpkg --version 2>/dev/null | awk '{print $NF}')
+else
+    version_path=$(find "${abs_dir}" -name VERSION -not -path "*/build/*" | head -1)
+    [[ -n "${version_path}" ]] && version=$(< "${version_path}")
+fi
 
 # Set service name and pathing for LaunchAgent
 sv_name="io.kandji.kpkg.brewcron"
@@ -322,6 +329,7 @@ function set_keystore() {
     fi
     echo
     if read -q "?Use keychain for token storage? (Y/N):"; then
+
         plutil -replace token_keystore.keychain -bool true -r "${config_file}"
     else
         plutil -replace token_keystore.keychain -bool false -r "${config_file}"
@@ -509,6 +517,12 @@ function check_store_keychain() {
             if (( ${opts[(I)(-r|--reset)]} )) && check_set_reset_var; then
                 return 0
             fi
+            if [[ ! -f "/Users/${user}/.local/bin/kpkg" ]]; then
+                echo "\n$(date +'%r') : WARNING: kpkg binary not found at expected path of /Users/${user}/.local/bin/kpkg"
+                echo "$(date +'%r') : Permanent installation is required for Keychain storage option"
+                echo "$(date +'%r') : Configure for ENV usage instead (run setup with -r/--reset and select ENV token storage)"
+                return 0
+            fi
             if read -q "?Store ${token_type} token in user keychain? (Y/N):"; then
                 prompt_for_secret "${token_type}"
                 echo "\n$(date +'%r') : Adding token to login keychain"
@@ -518,7 +532,7 @@ function check_store_keychain() {
                     exit 1
                 fi
                 security add-generic-password -U -a "kpkg" -s "${token_name}" -w "${BEARER_TOKEN}" \
-                    -T "/usr/bin/security" -T "/Users/${user}/Library/KandjiPackages/kpkg" \
+                    -T "/usr/bin/security" -T "/Users/${user}/.local/bin/kpkg" \
                     -T "/Users/${user}/Library/KandjiPackages/setup.zsh" ${user_keychain_path}
                 check_store_keychain
             fi
@@ -754,7 +768,7 @@ function populate_values_for_map() {
             prompt_for_secret
         else
             echo "\n$(date +'%r') : CRITICAL: Kandji token not found in ENV or keychain!"
-            echo "$(date +'%r') : CRITICAL: Please provide a valid token when prompted\nAlternatively, run ./setup.command to populate your config"
+            echo "$(date +'%r') : CRITICAL: Please provide a valid token when prompted\nAlternatively, run ./setup.zsh -r to repopulate your config"
             exit 1
         fi
     fi
@@ -1007,13 +1021,13 @@ function create_bootstrap_agent() {
             <key>EnvironmentVariables</key>
             <dict>
                 <key>PATH</key>
-                <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+                <string>/Users/${user}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
             </dict>
             <key>ProgramArguments</key>
             <array>
                 <string>zsh</string>
                 <string>-c</string>
-                <string>/usr/local/bin/kpkg${kpkg_fmt_casks}</string>
+                <string>/Users/${user}/.local/bin/kpkg${kpkg_fmt_casks}</string>
             </array>
             <key>RunAtLoad</key>
             <true/>
@@ -1102,6 +1116,11 @@ function agent_perms_load() {
 ##############################################
 # shellcheck disable=SC2120
 function main() {
+
+    if ! [[ $(uname) == "Darwin" ]]; then
+        echo "$(date +'%r') : ERROR: This setup script is only supported on macOS."
+        exit 1
+    fi
 
     if [[ "${EUID}" -eq 0 ]]; then
         echo "$(date +'%r') : kpkg-setup should NOT be run as superuser! Exiting..."
@@ -1211,4 +1230,4 @@ function main() {
 ##### MAIN ####
 ###############
 
-main
+[[ $ZSH_EVAL_CONTEXT != *:file* ]] && main

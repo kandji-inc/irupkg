@@ -1,0 +1,9 @@
+{
+  "brew_casks": [
+    "handbrake",
+    "iterm2",
+    "rectangle",
+    "zed"
+  ],
+  "every_n_hours": 2
+}

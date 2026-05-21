@@ -1,0 +1,45 @@
+# Keep secrets and local artifacts out of the build context.
+# `COPY . .` in the Dockerfile would otherwise bake any local .env or
+# build output into the image layer.
+
+# Secrets / local env
+.env
+.env.*
+!.env.example
+
+# Local backups / scratch
+*.bak
+pr.md
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.uv-cache/
+
+# Test + dev tooling
+tests/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Signed/built installers
+*.pkg
+*.dmg
+*.zip
+
+# VCS / editor
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.swp
+.DS_Store

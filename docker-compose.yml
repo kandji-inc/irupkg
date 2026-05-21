@@ -1,0 +1,19 @@
+# kpkg scheduled runner
+# Copy .env.example → .env and fill in your credentials before running.
+#
+# Usage:
+#   docker compose up -d          # start the scheduler (reads brew_cron.json for casks + interval)
+#   docker compose logs -f        # tail logs
+#   docker compose down           # stop
+
+services:
+  kpkg-scheduler:
+    build: .
+    entrypoint: ["/kpkg/scheduler.sh"]
+    environment:
+      KANDJI_API_URL: ${KANDJI_API_URL:?Set KANDJI_API_URL in .env or export it}
+      KANDJI_TOKEN: ${KANDJI_TOKEN:?Set KANDJI_TOKEN in .env or export it}
+      SLACK_TOKEN: ${SLACK_TOKEN:-}
+    volumes:
+      - ./brew_cron.json:/home/kpkg/.local/share/kpkg/brew_cron.json:ro
+    restart: unless-stopped

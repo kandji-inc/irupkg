@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kpkg"
+dynamic = ["version"]
+description = "Kandji Packages: standalone tool for programmatic management of Kandji Custom Apps"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+dependencies = [
+    "requests>=2.32",
+    "packaging>=20.0",
+    "platformdirs>=2.0",
+    "libarchive-c>=5.0; sys_platform == 'linux'",
+]
+
+[project.scripts]
+kpkg = "kpkg.kpkg:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-mock>=3.14",
+]
+
+[tool.setuptools]
+packages = ["kpkg", "kpkg.helpers", "kpkg.scripts"]
+package-dir = {"" = "src"}
+
+[tool.setuptools.package-data]
+"kpkg.scripts" = ["*.zsh"]
+
+[tool.setuptools.dynamic]
+version = {file = "VERSION"}
