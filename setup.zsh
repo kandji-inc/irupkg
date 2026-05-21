@@ -329,7 +329,6 @@ function set_keystore() {
     fi
     echo
     if read -q "?Use keychain for token storage? (Y/N):"; then
-
         plutil -replace token_keystore.keychain -bool true -r "${config_file}"
     else
         plutil -replace token_keystore.keychain -bool false -r "${config_file}"
