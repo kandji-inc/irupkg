@@ -1,11 +1,10 @@
-#!/usr/bin/env python3
 # Created 01/16/24; NRJA
 # Updated 02/20/24; NRJA
 ################################################################################################
 # License Information
 ################################################################################################
 #
-# Copyright 2024 Kandji, Inc.
+# Copyright 2026 Iru, Inc.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy of this
 # software and associated documentation files (the "Software"), to deal in the Software
@@ -31,9 +30,11 @@
 
 import difflib
 import hashlib
+import importlib.resources
 import json
 import logging
 import os
+import platform
 import plistlib
 import re
 import shlex
@@ -41,7 +42,8 @@ import shutil
 import sys
 import tempfile
 import time
-import xml.etree.ElementTree as ETree
+import xml.etree.ElementTree as ET
+import zipfile
 from datetime import datetime
 from fileinput import FileInput
 from functools import reduce
@@ -50,7 +52,7 @@ from subprocess import PIPE, STDOUT, run
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
-from pip._vendor.packaging import version as packaging_version
+from packaging import version as packaging_version
 
 ###########################
 ######### LOGGING #########
@@ -58,22 +60,49 @@ from pip._vendor.packaging import version as packaging_version
 
 log = logging.getLogger(__name__)
 
+# Bound every outbound HTTP call so a hung upstream (Kandji/Slack/brew.sh) can't
+# stall the scheduler loop indefinitely. requests defaults to no timeout.
+HTTP_TIMEOUT = 30
+
+
+def env_keystore_enabled() -> bool:
+    """True when ENV_KEYSTORE is set to an explicit truthy value.
+
+    Presence-only checks let unrelated processes that happen to export the var
+    (or set it empty) bypass the root-execution guard and force-flip the
+    keystore config. Require an explicit opt-in instead.
+    """
+    return os.environ.get("ENV_KEYSTORE", "").strip().lower() in ("1", "true", "yes", "on")
+
 
 def source_from_brew(brew_name):
     """Fetches the download for a Homebrew package and returns local path"""
     downloader = Utilities()
     log.info(f"brew fetching '{brew_name}'...")
+    # If not macOS, specify newest macOS version/arch for correct fetch
+    os_arch = ""
+    if platform.system() != "Darwin":
+        brew_api = "https://formulae.brew.sh/api/formula/curl.json"
+        newest_macos = next(
+            k
+            for k in requests.get(brew_api, timeout=HTTP_TIMEOUT).json()["bottle"]["stable"]["files"]
+            if "linux" not in k
+        )
+        os_arch = f"--os {newest_macos.split('_', 1)[-1]} --arch arm"
     try:
-        brew_out = downloader._run_command(f"brew fetch {brew_name} -s")
+        brew_out = downloader._run_command(f"brew fetch {os_arch} --cask {brew_name}")
     except FileNotFoundError:
         log.fatal(f"Failed to run 'brew fetch {brew_name}'")
         log.fatal("Confirm Homebrew is installed/available in PATH and try again")
         sys.exit(1)
     if brew_out is False:
-        log.error(f"Failed to fetch {brew_name} — skipping...")
+        log.error(f"Failed to fetch {brew_name} -- skipping...")
         log.error(f"Run 'brew search --cask {brew_name}' to validate cask name")
         return None
-    download_path = next(out for out in brew_out.splitlines() if "downloaded" in out.lower()).split(": ")[-1]
+    download_path = downloader._run_command(f"brew --cache {os_arch} --cask {brew_name}")
+    if not download_path or not Path(download_path).exists():
+        log.error(f"Could not determine download path for '{brew_name}'")
+        return None
     log.info(f"Downloaded '{brew_name}' to '{download_path}'")
     return download_path
 
@@ -110,7 +139,7 @@ class Utilities:
         """Parses provided URL, formats, and returns to ensure proper scheme for cURL"""
         parsed_url = urlsplit(url)
         if not parsed_url.scheme or parsed_url.scheme == "http":
-            netloc = parsed_url.netloc if parsed_url.netloc else parsed_url.path
+            netloc = parsed_url.netloc or parsed_url.path
             path = parsed_url.path if parsed_url.netloc else ""
             new_url = parsed_url._replace(scheme="https", netloc=netloc, path=path)
             return urlunsplit(new_url)
@@ -151,10 +180,14 @@ class Utilities:
                     custom_app_url = os.path.join(self.tenant_url, "library", "custom-apps", custom_app_id)
                     log.info(f"SUCCESS: Custom App {action.capitalize()}")
                     log.info(f"Custom App '{custom_name}' available at '{custom_app_url}'")
+                    app_vers = getattr(self, "app_vers", None)
+                    version_line = f"*Version*: `{app_vers}`\n" if app_vers else ""
                     self.slack_notify(
                         "SUCCESS",
                         f"Custom App {action.capitalize()}d",
-                        f"*Name*: `{custom_name}`\n*ID*: `{custom_app_id}`\n*Media*: `{self.pkg_name}`\n*Enforcement*: `{config_named_enforcement}`",
+                        f"*Name*: `{custom_name}`\n*ID*: `{custom_app_id}`\n"
+                        f"*Media*: `{self.pkg_name}`\n{version_line}"
+                        f"*Enforcement*: `{config_named_enforcement}`",
                         title_link=custom_app_url,
                     )
                 case _:
@@ -163,7 +196,7 @@ class Utilities:
                     )
                     return False
             return True
-        elif http_code == 503 and (action.lower() == "update" or "create"):
+        elif http_code == 503 and action.lower() in ("update", "create"):
             log.warning(f"(HTTP {http_code}): {response.json().get('detail')}")
             log.info("Retrying in five seconds...")
             time.sleep(5)
@@ -216,9 +249,7 @@ class Utilities:
                         f"DAYS_UNTIL_ENFORCEMENT={self.test_delay}"
                         if self.test_app is True
                         else f"DAYS_UNTIL_ENFORCEMENT={self.prod_delay}"
-                        if self.prod_app is True
-                        else f"DAYS_UNTIL_ENFORCEMENT={self.prod_delay}"
-                        if self.prod_delay
+                        if (self.prod_app is True or self.prod_delay)
                         else line
                     )
                 # Print here writes to file vs. stdout
@@ -227,6 +258,34 @@ class Utilities:
     def _restore_audit(self):
         """Overwrite customized audit script with clean backup"""
         shutil.move(self.audit_script_path + ".bak", self.audit_script_path)
+
+    def _ensure_audit_script(self):
+        """Resolve the audit script, falling back through CWD and the packaged copy.
+
+        The script is mutated in place (with a .bak backup) during uploads, so the
+        bundled resource is copied into `audit_script_path` rather than executed
+        from `site-packages` directly.
+        """
+        if os.path.exists(self.audit_script_path):
+            return
+        for candidate in [Path.cwd(), Path.cwd().parent]:
+            path = candidate / self.audit_script
+            if path.exists():
+                self.audit_script_path = str(path)
+                return
+        try:
+            packaged = importlib.resources.files("kpkg.scripts").joinpath(self.audit_script)
+            with importlib.resources.as_file(packaged) as src:
+                os.makedirs(os.path.dirname(self.audit_script_path), exist_ok=True)
+                shutil.copy(src, self.audit_script_path)
+            return
+        except (FileNotFoundError, ModuleNotFoundError):
+            pass
+        raise FileNotFoundError(
+            f"Audit script not found at {self.audit_script_path}. "
+            "Set KPKG_LOCAL_DIR to the repo root, set KPKG_CONFIG_DIR to a directory "
+            "containing audit_app_and_version.zsh, or copy the script there manually."
+        )
 
     ######################
     # Token Lookup Funcs
@@ -248,12 +307,15 @@ class Utilities:
         return decoded_out if decoded_out is not False else None
 
     def _retrieve_token(self, item_name):
-        """Searches for by name and returns token for keystores toggled for use
-        If multiple keystores are enabled, first searches ENV for token, then if not found, keychain"""
+        """Return token by name, searching configured keystores then falling back to ENV on non-Darwin platforms."""
         token_val = None
-        token_val = self._env_token_get(item_name) if self.token_keystores.get("environment") is True else None
-        if not token_val:
-            token_val = self._keychain_token_get(item_name) if self.token_keystores.get("keychain") is True else None
+        if self.token_keystores.get("environment"):
+            token_val = self._env_token_get(item_name)
+        if not token_val and self.token_keystores.get("keychain"):
+            token_val = self._keychain_token_get(item_name)
+        # On macOS, config.json is authoritative; ENV_KEYSTORE=1 is the opt-in (force-flips it in configs.py).
+        if not token_val and platform.system() != "Darwin":
+            token_val = self._env_token_get(item_name)
         return token_val
 
     ######################
@@ -292,21 +354,69 @@ class Utilities:
             return likely_file
 
         def _pkg_expand(src, dst):
-            """Subprocess runs pkgutil --expand-full
-            on source src, expanding to destination dst"""
-            # Shell out to do PKG expansion and validate success
-            shell_cmd = f"pkgutil --expand-full '{src}' '{dst}'"
-            if self._run_command(shell_cmd) is not False:
-                return True
-            return False
+            """Expand a .pkg file.
+            On macOS, uses pkgutil --expand-full.
+            On Linux, uses libarchive-c to extract XAR then decompress each Payload (cpio.gz)."""
+            if platform.system() == "Darwin":
+                shell_cmd = f"pkgutil --expand-full '{src}' '{dst}'"
+                return self._run_command(shell_cmd) is not False
 
-        def _dmg_attach(src, dst):
+            # Linux path -- requires libarchive-c (optional dependency)
+            logging.getLogger("libarchive").setLevel(logging.WARNING)
+            try:
+                import libarchive  # noqa: PLC0415
+            except (ImportError, AttributeError):
+                log.fatal("libarchive-c and the system libarchive library are required on Linux")
+                log.fatal("Install with: apt-get install libarchive13 && pip install libarchive-c")
+                return False
+
+            os.makedirs(dst, exist_ok=True)
+            old_cwd = os.getcwd()
+            src = os.path.abspath(src)
+
+            # Pass 1: extract the outer XAR archive (gets PackageInfo, Distribution, Payload files)
+            try:
+                os.chdir(dst)
+                libarchive.extract_file(src)
+            except Exception as err:
+                log.error(f"Failed to extract XAR archive '{src}': {err}")
+                return False
+            finally:
+                os.chdir(old_cwd)
+
+            # Pass 2: decompress each Payload (gzip+cpio) into its parent component dir
+            for payload_path in Path(dst).glob("**/Payload"):
+                try:
+                    os.chdir(str(payload_path.parent))
+                    libarchive.extract_file(str(payload_path))
+                except Exception as err:
+                    log.debug(f"Could not decompress Payload at {payload_path}: {err}")
+                finally:
+                    os.chdir(old_cwd)
+
+            return True
+
+        def _zip_extract(src, dst):
+            """Extract a ZIP archive to dst using stdlib zipfile."""
+            try:
+                os.makedirs(dst, exist_ok=True)
+                with zipfile.ZipFile(src, "r") as zf:
+                    zf.extractall(dst)
+                return True
+            except Exception as err:
+                log.error(f"Failed to extract ZIP '{src}': {err}")
+                return False
+
+        def _dmg_attach(src, dst, retry=True):
             """Subprocess runs hdiutil attach
-            on source src, mounting at destination dst"""
+            on source src, mounting at destination dst.
+            retry=False prevents infinite recursion when the detach-and-reattach fallback also fails."""
             # Shell out to do DMG attach and validate success
             shell_cmd = f"hdiutil attach '{src}' -mountpoint '{dst}' -nobrowse -noverify -noautoopen"
             if self._run_command(shell_cmd) is not False:
                 return True
+            if not retry:
+                return False
             # Run with shell=True to allow pipe
             shell_cmd = f"hdiutil info | grep '{src}' -A20 | grep -m 1 '/dev/disk' | awk '{{print $1}}'"
             raw_out = run(shell_cmd, stdout=PIPE, stderr=STDOUT, shell=True, check=False)
@@ -314,7 +424,7 @@ class Utilities:
             log.debug(f"Located existing mount point for DMG at {mount_point}")
             log.debug(f"Attempting unmount of {mount_point}...")
             if _dmg_detach(mount_point) is not False:
-                return _dmg_attach(src, dst)
+                return _dmg_attach(src, dst, retry=False)
             return False
 
         def _dmg_detach(dst):
@@ -322,6 +432,23 @@ class Utilities:
             shell_cmd = f"hdiutil detach '{dst}' -force"
             if self._run_command(shell_cmd) is not False:
                 return True
+            return False
+
+        def _dmg_extract_linux(src, dst):
+            """Extract a DMG on Linux using 7z. No root required.
+            Handles HFS+, APFS, and APM-based DMGs. Non-zero exit is acceptable
+            if app content was actually extracted (e.g. skipped symlinks)."""
+            os.makedirs(dst, exist_ok=True)
+            shell_cmd = f"7z x '{src}' -o'{dst}' -y"
+            raw_out = run(shlex.split(shell_cmd), stdout=PIPE, stderr=STDOUT, shell=False, check=False)
+            exit_code = raw_out.returncode
+            decoded_out = raw_out.stdout.decode().strip()
+            if exit_code == 0:
+                return True
+            log.debug(f"7z exited {exit_code} for '{os.path.basename(src)}'; checking for extracted content")
+            if next(Path(dst).glob("**/*.app"), None) or next(Path(dst).glob("**/Info.plist"), None):
+                return True
+            log.error(f"'{shell_cmd}' failed with exit code {exit_code} and output '{decoded_out}'")
             return False
 
         def _has_applications_symlink_alias(dmg_path):
@@ -391,8 +518,10 @@ class Utilities:
 
             # Quickly iter and assign all plist values we want
             def lookup_from_plist():
+                with open(likely_plist, "rb") as f:
+                    plist = plistlib.load(f)
                 return {
-                    k: plistlib.load(open(likely_plist, "rb")).get(k)
+                    k: plist.get(k)
                     for k in ("CFBundleIdentifier", "CFBundleShortVersionString", "CFBundleDisplayName", "CFBundleName")
                 }
 
@@ -409,10 +538,10 @@ class Utilities:
                 """Parses PKG ID and version from either Distribution
                 or PackageInfo XML file; returns tuple of ID and version"""
                 # Convert to str if PosixPath
-                if type(xml_file) == PosixPath:
+                if type(xml_file) is PosixPath:
                     xml_file = xml_file.as_posix()
                 with open(xml_file) as f:
-                    parsed_xml = ETree.parse(f)
+                    parsed_xml = ET.parse(f)
                 if "Distribution" in xml_file:
                     try:
                         distro_pkg_info = parsed_xml.find("product").attrib
@@ -483,12 +612,13 @@ class Utilities:
                 return True
             if self.dmg_is_mounted is True:
                 _dmg_detach(self.tmp_dmg_mount)
-            # rm dir + exploded PKG when done
+                time.sleep(1)  # Allow OS to fully release the mount before rmtree
             try:
                 self.temp_dir.cleanup()
             except OSError:
                 log.debug("Attempting DMG unmount and cleaning up...")
                 _dmg_detach(self.tmp_dmg_mount)
+                time.sleep(2)
                 try:
                     self.temp_dir.cleanup()
                 except OSError:
@@ -521,10 +651,15 @@ class Utilities:
         app_installer_path, chosen_pkg = None, None
         self.dmg_is_mounted = False
         if self.install_type == "image":
-            if _dmg_attach(self.pkg_path, self.tmp_dmg_mount) is False:
-                log.error("Unable to parse files as DMG failed to attach")
-                return Exception
-            self.dmg_is_mounted = True
+            if platform.system() == "Darwin":
+                if _dmg_attach(self.pkg_path, self.tmp_dmg_mount) is False:
+                    log.error("Unable to parse files as DMG failed to attach")
+                    return Exception
+                self.dmg_is_mounted = True
+            else:
+                if _dmg_extract_linux(self.pkg_path, self.tmp_dmg_mount) is False:
+                    log.error("Unable to parse files as DMG failed to extract")
+                    return Exception
             mounted_dmg = Path(self.tmp_dmg_mount)
             # If Applications symlink/alias in DMG, likely a drag 'n' drop .app
             applications_dmg = _has_applications_symlink_alias(mounted_dmg)
@@ -545,6 +680,15 @@ class Utilities:
             # Finally, proceed with .app
             elif app_check:
                 app_installer_path = self.tmp_dmg_mount
+            else:
+                log.error("No .app, PKG, or Applications symlink found in extracted DMG")
+                log.error("APFS-formatted DMGs require 7-Zip 21.07+ (install 'apt 7zip', not 'p7zip-full')")
+                raise Exception
+        if self.install_type == "zip":
+            if _zip_extract(self.pkg_path, self.tmp_pkg_path) is False:
+                log.error("Unable to parse files as ZIP failed to extract")
+                raise Exception
+            app_installer_path = self.tmp_pkg_path
         if self.install_type == "package" or chosen_pkg is not None:
             chosen_pkg = chosen_pkg or self.pkg_path
             log.debug(f"Selected '{chosen_pkg}' for remaining operations...")
@@ -565,9 +709,12 @@ class Utilities:
         if id_query is True:
             log.debug("Running ID query for installer media")
             if self.install_type == "package":
-                self.map_id, app_vers = _pkg_metadata_find_return(self.tmp_pkg_path)
+                self.map_id, _app_vers = _pkg_metadata_find_return(self.tmp_pkg_path)
             elif self.install_type == "image":
                 plist_values, likely_plist = _plist_find_return(app_installer_path)
+                self.map_id = plist_values["CFBundleIdentifier"]
+            elif self.install_type == "zip":
+                plist_values, _ = _plist_find_return(app_installer_path)
                 self.map_id = plist_values["CFBundleIdentifier"]
             # Don't clean up dir if we're just querying for PKG ID
             # We'll be back later for the full app info
@@ -826,7 +973,9 @@ class Utilities:
         if title_link:
             title_link = self._ensure_https(title_link)
             slack_payload["attachments"][0]["title_link"] = title_link
-        slack_response = requests.post(self.slack_channel, headers=self.headers, data=json.dumps(slack_payload))
+        slack_response = requests.post(
+            self.slack_channel, headers=self.headers, data=json.dumps(slack_payload), timeout=HTTP_TIMEOUT
+        )
         if slack_response.status_code <= 204:
             log.info("Successfully posted message to Slack channel")
         else:

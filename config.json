@@ -25,6 +25,7 @@
     "dynamic_lookup" : false,
     "new_app_naming" : "APPNAME (kpkg)",
     "self_service_category" : "Apps",
-    "test_self_service_category" : "Utilities"
+    "test_self_service_category" : "Utilities",
+    "unzip_location": "/Applications"
   }
 }
