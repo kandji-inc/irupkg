@@ -96,7 +96,7 @@ wheels = [
 ]
 
 [[package]]
-name = "kpkg"
+name = "irupkg"
 source = { editable = "." }
 dependencies = [
     { name = "libarchive-c", marker = "sys_platform == 'linux'" },

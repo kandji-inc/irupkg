@@ -1,0 +1,171 @@
+name: Example - irupkg brew scheduler + iructl
+
+# Example workflow: periodically check Homebrew casks for new versions, upload
+# any updates to Iru via irupkg, then pull the resulting app state back into git
+# via iructl. Copy and adapt this file for your own repo.
+#
+# This extends the irupkg-brew-scheduler pattern with iructl record-keeping:
+# after irupkg uploads a cask update, iructl pulls the updated app state from
+# Iru and commits it to a config repo - creating a git-tracked deployment history.
+#
+# Secrets required (Settings > Secrets > Actions):
+#   IRU_API_URL        - Iru tenant API URL (e.g. https://acme.api.iru.com); used by both irupkg and iructl
+#   IRUPKG_TOKEN       - Iru API token for irupkg
+#   SLACK_TOKEN        - Slack webhook token for irupkg notifications (optional)
+#   IRUCTL_TOKEN       - Iru API token for iructl
+#   CLIENT_ID          - GitHub App client ID (see GitHub App Setup below)
+#   APP_PRIVATE_KEY    - GitHub App private key (see GitHub App Setup below)
+#
+# Variables required (Settings > Actions > Variables):
+#   IRUCTL_REPO        - Name of the repo where iructl app state is committed (e.g. my-iructl-repo)
+#
+# GitHub App Setup:
+#   A GitHub App is used instead of a PAT so that the commit token is short-lived (1 hour),
+#   scoped only to the iructl repo, and not tied to any individual's account.
+#
+#   1. Create a GitHub App (Settings > Developer settings > GitHub Apps > New GitHub App):
+#      - Name: something like "irupkg-iructl-bot"
+#      - Uncheck "Active" under Webhook
+#      - Repository permissions: set Contents to "Read and write", Pull requests to "Read and write"
+#      - Leave everything else at defaults
+#   2. After creating, note the Client ID (App's General settings page) -- this is your CLIENT_ID secret
+#   3. Under "Private keys", generate and download a private key (.pem)
+#      - The full contents of the .pem file is your APP_PRIVATE_KEY secret
+#   4. Install the app on your iructl state repo and any private repos iructl depends on:
+#      - From the app page, click "Install App" and select the relevant repos
+#   5. Add CLIENT_ID and APP_PRIVATE_KEY to this repo's secrets (Settings > Secrets > Actions)
+
+on:
+  # schedule:
+  #   # Every two hours. Adjust as needed; balance installer freshness vs CI cost.
+  #  - cron: '0 */2 * * *'
+  workflow_dispatch:  # manual trigger for testing or re-sync
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: example-irupkg-iructl-brew
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: irupkg
+    env:
+      IRU_API_URL: ${{ secrets.IRU_API_URL }}
+      IRUPKG_TOKEN: ${{ secrets.IRUPKG_TOKEN }}
+      SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
+      # Keep config.json + audit_app_and_version.zsh resolution co-located
+      # with the checked-out source so irupkg doesn't try to read/write under $HOME.
+      IRUPKG_LOCAL_DIR: ${{ github.workspace }}/irupkg
+      # Repo where iructl app state is committed. Set IRUCTL_REPO in
+      # Settings > Actions > Variables to override without editing this file.
+      IRUCTL_REPO: ${{ vars.IRUCTL_REPO }}
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install 7-Zip 26.01
+        # Stock 7z on ubuntu-latest is too old to extract modern Apple DMGs
+        # (UDIF + HFS+/APFS). Mirrors the same install used by the Docker image.
+        # Tarball sha256s are pinned so a compromised/mirrored 7-zip.org cannot
+        # silently swap the binary.
+        env:
+          SHA256_X64: 8ea0fc8a135e7b848e80a4116fe22dff56c8c4518dde1f43cce67f4e340b437a  # pragma: allowlist secret
+          SHA256_ARM64: 39f8c9070c300a63c7484d9a983119ef3edf841e1ddf69f1affae29fdec5f612  # pragma: allowlist secret
+        run: |
+          arch=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/')
+          case "${arch}" in
+              x64)   expected_sha="${SHA256_X64}" ;;
+              arm64) expected_sha="${SHA256_ARM64}" ;;
+              *) echo "Unsupported arch: ${arch}" >&2; exit 1 ;;
+          esac
+          curl -fsSLo /tmp/7z.tar.xz "https://www.7-zip.org/a/7z2601-linux-${arch}.tar.xz"
+          echo "${expected_sha}  /tmp/7z.tar.xz" | sha256sum -c -
+          sudo tar -xf /tmp/7z.tar.xz -C /usr/local/bin 7zz
+          sudo ln -sf /usr/local/bin/7zz /usr/local/bin/7z
+          rm /tmp/7z.tar.xz
+          7z --help | head -3
+
+      - name: Add Homebrew to PATH
+        run: |
+          echo "/home/linuxbrew/.linuxbrew/bin" >> "$GITHUB_PATH"
+          echo "/home/linuxbrew/.linuxbrew/sbin" >> "$GITHUB_PATH"
+
+      - name: Update Homebrew taps
+        # Without this, the runner's tap snapshot can be stale and brew will
+        # serve an outdated cask formula whose recorded sha differs from what
+        # upstream is currently serving, causing spurious re-uploads.
+        run: brew update
+
+      - name: Run irupkg against configured casks
+        run: |
+          casks=$(jq -r '.brew_casks | map("-b " + .) | join(" ")' brew_cron.json)
+          echo "Running: irupkg ${casks}"
+          # shellcheck disable=SC2086
+          uv run irupkg ${casks}
+
+      - name: Checkout iructl state repo
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository_owner }}/${{ env.IRUCTL_REPO }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: state-repo
+
+      - name: Reset state repo to origin
+        working-directory: state-repo
+        run: |
+          git fetch origin
+          git reset --hard origin/main
+          git clean -ffdx
+
+      - name: Install iructl
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
+          uv tool install git+https://github.com/kandji-inc/internal-kst.git
+
+      - name: Pull updated app state from Iru
+        env:
+          IRUCTL_TENANT: ${{ secrets.IRU_API_URL }}
+          IRUCTL_TOKEN: ${{ secrets.IRUCTL_TOKEN }}
+        working-directory: state-repo
+        run: iructl app pull --all
+
+      - name: Push app state and open PR
+        working-directory: state-repo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git fetch origin
+          commits_ahead=$(git rev-list --count origin/main..HEAD)
+          if [ "${commits_ahead}" -eq 0 ]; then
+            echo "No app state changes: already up to date with origin, skipping PR"
+            exit 0
+          fi
+          branch="chore/sync-app-state-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          git checkout -b "${branch}"
+          git push origin "${branch}"
+          gh pr create \
+            --base main \
+            --head "${branch}" \
+            --title "chore: sync app state after irupkg brew deploy" \
+            --body "Automated app state sync triggered by workflow run [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."

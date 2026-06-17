@@ -1,5 +1,5 @@
-# kpkg scheduled runner
-# Copy .env.example → .env and fill in your credentials before running.
+# irupkg scheduled runner
+# Copy .env.example --> .env and fill in your credentials before running.
 #
 # Usage:
 #   docker compose up -d          # start the scheduler (reads brew_cron.json for casks + interval)
@@ -7,13 +7,15 @@
 #   docker compose down           # stop
 
 services:
-  kpkg-scheduler:
+  irupkg-scheduler:
     build: .
-    entrypoint: ["/kpkg/scheduler.sh"]
+    entrypoint: ["/irupkg/scheduler.sh"]
     environment:
-      KANDJI_API_URL: ${KANDJI_API_URL:?Set KANDJI_API_URL in .env or export it}
-      KANDJI_TOKEN: ${KANDJI_TOKEN:?Set KANDJI_TOKEN in .env or export it}
+      IRU_API_URL: ${IRU_API_URL:-}
+      KANDJI_API_URL: ${KANDJI_API_URL:-}
+      IRUPKG_TOKEN: ${IRUPKG_TOKEN:-}
+      KANDJI_TOKEN: ${KANDJI_TOKEN:-}
       SLACK_TOKEN: ${SLACK_TOKEN:-}
     volumes:
-      - ./brew_cron.json:/home/kpkg/.local/share/kpkg/brew_cron.json:ro
+      - ./brew_cron.json:/home/irupkg/.local/share/irupkg/brew_cron.json:ro
     restart: unless-stopped

@@ -6,7 +6,7 @@ labels:
 body:
   - type: markdown
     attributes:
-      value: "## Request new functionality for Kandji's standalone tool, kpkg"
+      value: "## Request new functionality for Iru's standalone tool, irupkg"
   - type: checkboxes
     id: nodupes
     attributes:
@@ -22,7 +22,7 @@ body:
       label: Description
       description: Please describe your feature request below
       placeholder: |
-        I would like kpkg to be able to...
+        I would like irupkg to be able to...
         So that I can...
     validations:
       required: true

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kpkg"
+name = "irupkg"
 dynamic = ["version"]
-description = "Kandji Packages: standalone tool for programmatic management of Kandji Custom Apps"
+description = "Iru Packages: standalone tool for programmatic management of Iru Custom Apps"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.scripts]
-kpkg = "kpkg.kpkg:main"
+irupkg = "irupkg.irupkg:main"
+kpkg = "irupkg._compat:_kpkg_alias"
 
 [dependency-groups]
 dev = [
@@ -26,11 +27,11 @@ dev = [
 ]
 
 [tool.setuptools]
-packages = ["kpkg", "kpkg.helpers", "kpkg.scripts"]
+packages = ["irupkg", "irupkg.helpers", "irupkg.scripts"]
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-"kpkg.scripts" = ["*.zsh"]
+"irupkg.scripts" = ["*.zsh"]
 
 [tool.setuptools.dynamic]
 version = {file = "VERSION"}

@@ -1,17 +1,27 @@
 #!/bin/bash
-# Reads brew_cron.json and runs kpkg -b for each listed cask on the configured interval.
+# Reads brew_cron.json and runs irupkg -b for each listed cask on the configured interval.
 set -euo pipefail
 
-CRON_FILE="/home/kpkg/.local/share/kpkg/brew_cron.json"
+CRON_FILE="/home/irupkg/.local/share/irupkg/brew_cron.json"
 
 if [[ ! -f "${CRON_FILE}" ]]; then
     echo "ERROR: brew_cron.json not found at ${CRON_FILE}" >&2
     exit 1
 fi
 
+# Deprecation shims: fall back to KANDJI_* names with a warning
+if [[ -z "${IRU_API_URL:-}" && -n "${KANDJI_API_URL:-}" ]]; then
+    echo "WARNING: KANDJI_API_URL is deprecated, use IRU_API_URL instead" >&2
+    export IRU_API_URL="${KANDJI_API_URL}"
+fi
+if [[ -z "${IRUPKG_TOKEN:-}" && -n "${KANDJI_TOKEN:-}" ]]; then
+    echo "WARNING: KANDJI_TOKEN is deprecated, use IRUPKG_TOKEN instead" >&2
+    export IRUPKG_TOKEN="${KANDJI_TOKEN}"
+fi
+
 # Verify required credentials are available before entering the loop
-if [[ -z "${KANDJI_API_URL:-}" || -z "${KANDJI_TOKEN:-}" ]]; then
-    echo "ERROR: KANDJI_API_URL and KANDJI_TOKEN must be set" >&2
+if [[ -z "${IRU_API_URL:-}" || -z "${IRUPKG_TOKEN:-}" ]]; then
+    echo "ERROR: IRU_API_URL and IRUPKG_TOKEN must be set" >&2
     exit 1
 fi
 
@@ -26,13 +36,13 @@ while true; do
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Updating Homebrew taps"
     brew update >/dev/null || echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: brew update failed; continuing with cached formulas"
 
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Running: kpkg ${CASK_ARGS}"
-    # kpkg exits non-zero if any single cask fails; without this guard `set -e`
+    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Running: irupkg ${CASK_ARGS}"
+    # irupkg exits non-zero if any single cask fails; without this guard `set -e`
     # would terminate the loop and compose's restart policy would respawn the
     # container in a tight crash/restart cycle. Log and continue instead.
     # shellcheck disable=SC2086
-    if ! kpkg ${CASK_ARGS}; then
-        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: kpkg run reported failure; continuing to next interval"
+    if ! irupkg ${CASK_ARGS}; then
+        echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] WARNING: irupkg run reported failure; continuing to next interval"
     fi
 
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Next run in $((SLEEP_SECS / 3600))h -- sleeping"

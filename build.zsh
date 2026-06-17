@@ -31,7 +31,7 @@
 
 dir=$(dirname ${ZSH_ARGZERO})
 version=$(cat "${dir}/VERSION")
-identifier="io.kandji.kpkg"
+identifier="com.iru.irupkg"
 tmp_dir=$(mktemp -d)
 payload_dir="${tmp_dir}/Payload/tmp"
 scripts_dir="${tmp_dir}/Scripts"
@@ -45,7 +45,7 @@ scripts_dir="${tmp_dir}/Scripts"
 # to the payload staging area
 ##############################################
 function build_wheel() {
-    echo "Building kpkg wheel..."
+    echo "Building irupkg wheel..."
     if ! build_output=$(uv build --wheel --out-dir "${tmp_dir}" "${dir}" 2>&1); then
         echo "ERROR: uv build failed"
         echo "${build_output}"
@@ -63,7 +63,7 @@ function build_wheel() {
 ##############################################
 # Writes the postinstall script that:
 #  - ensures uv is available
-#  - installs kpkg via uv tool install
+#  - installs irupkg via uv tool install
 #  - copies config templates to data dir
 #  - adds ~/.local/bin to PATH if absent
 ##############################################
@@ -75,7 +75,7 @@ function write_postinstall() {
 user=$(stat -f%Su /dev/console)
 user_id=$(stat -f%Du /dev/console)
 user_dir=$(dscl /Local/Default -read "/Users/${user}" NFSHomeDirectory | /usr/bin/cut -d ":" -f2 | /usr/bin/xargs)
-data_dir="${user_dir}/Library/KandjiPackages"
+data_dir="${user_dir}/Library/IruPackages"
 function run_as_user() { sudo launchctl asuser "${user_id}" sudo -u "${user}" -H "${@}" }
 
 # Ensure uv is installed for the target user
@@ -86,15 +86,24 @@ if ! uv_bin=$(run_as_user command -v uv); then
     uv_bin=$(run_as_user command -v uv)
 fi
 
-# Install kpkg wheel via uv tool install
-wheel_path=$(find /private/tmp -iname "kpkg-*.whl" 2>/dev/null | head -1)
+# Install irupkg wheel via uv tool install
+wheel_path=$(find /private/tmp -iname "irupkg-*.whl" 2>/dev/null | head -1)
 if [[ -z ${wheel_path} ]]; then
-    echo "ERROR: kpkg wheel not found in /tmp"
+    echo "ERROR: irupkg wheel not found in /tmp"
     exit 1
 fi
 run_as_user "${uv_bin}" tool install --force --reinstall "${wheel_path}"
 run_as_user "${uv_bin}" tool update-shell
 rm -f "${wheel_path}"
+
+# Migrate from legacy KandjiPackages install before creating the new data dir
+if [[ -d "${user_dir}/Library/KandjiPackages" && ! -d "${user_dir}/Library/IruPackages" ]]; then
+    run_as_user mv "${user_dir}/Library/KandjiPackages" "${user_dir}/Library/IruPackages"
+elif [[ -d "${user_dir}/Library/KandjiPackages" && -d "${user_dir}/Library/IruPackages" ]]; then
+    if run_as_user rsync -a --ignore-existing "${user_dir}/Library/KandjiPackages/" "${user_dir}/Library/IruPackages/"; then
+        rm -rf "${user_dir}/Library/KandjiPackages"
+    fi
+fi
 
 # Copy config templates to data directory (skip if already present)
 mkdir -p "${data_dir}"
@@ -107,14 +116,21 @@ for f in package_map.json config.json audit_app_and_version.zsh brew_cron.json; 
 done
 chown -R "${user}" "${data_dir}"
 
-# Symlink kpkg-setup into ~/.local/bin alongside kpkg (placed there by uv tool install)
+# Symlink irupkg-setup into ~/.local/bin; keep kpkg-setup as deprecated alias
 run_as_user mkdir -p "${user_dir}/.local/bin"
+run_as_user ln -sf "${data_dir}/setup.zsh" "${user_dir}/.local/bin/irupkg-setup"
 run_as_user ln -sf "${data_dir}/setup.zsh" "${user_dir}/.local/bin/kpkg-setup"
+legacy_plist="${user_dir}/Library/LaunchAgents/io.kandji.kpkg.brewcron.plist"
+if [[ -f "${legacy_plist}" ]]; then
+    run_as_user launchctl bootout "gui/${user_id}/io.kandji.kpkg.brewcron" 2>/dev/null
+    rm -f "${legacy_plist}"
+fi
+
 if [[ -f "${data_dir}/kpkg" ]]; then
     echo "Removing legacy kpkg binary from ${data_dir}..."
     rm -f -R "${data_dir}/kpkg" "${data_dir}/.kpkg_py_framework"
 fi
-# Remove legacy kpkg/kpkg-setup symlinks from /usr/local/bin (2.0.0 places both on PATH via ~/.local/bin)
+# Remove legacy kpkg/kpkg-setup symlinks from /usr/local/bin (now installed to ~/.local/bin)
 rm -f "/usr/local/bin/kpkg" "/usr/local/bin/kpkg-setup"
 
 exit 0
@@ -138,15 +154,15 @@ function build_pkg() {
         [[ -f "${dir}/${f}" ]] && cp "${dir}/${f}" "${payload_dir}/"
     done
 
-    echo "Creating kpkg-${version}.pkg"
+    echo "Creating irupkg-${version}.pkg"
     /usr/bin/pkgbuild \
         --quiet \
         --root "${tmp_dir}/Payload" \
         --scripts "${scripts_dir}" \
         --identifier "${identifier}" \
         --version "${version}" \
-        "${dir}/kpkg-${version}.pkg"
-    echo "Successfully built ${dir}/kpkg-${version}.pkg"
+        "${dir}/irupkg-${version}.pkg"
+    echo "Successfully built ${dir}/irupkg-${version}.pkg"
 }
 
 ##############################################
