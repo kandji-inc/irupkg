@@ -137,11 +137,8 @@ jobs:
           git clean -ffdx
 
       - name: Install iructl
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          git config --global url."https://x-access-token:${GH_TOKEN}@github.com/".insteadOf "https://github.com/"
-          uv tool install git+https://github.com/kandji-inc/internal-kst.git
+          uv tool install git+https://github.com/kandji-inc/iructl.git
 
       - name: Pull updated app state from Iru
         env:
