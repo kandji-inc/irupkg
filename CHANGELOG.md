@@ -1,3 +1,24 @@
+## v2.1.0
+---
+#### **Breaking changes**:
+- The tool has been renamed from `kpkg` to `irupkg` (Iru Packages).
+  - The `kpkg` command remains available as a deprecated alias and will print a warning to stderr on each invocation. Update scripts and workflows to use `irupkg`.
+  - Python import path changed: `import irupkg` (was `import kpkg`); `IrupkgResult` and `IrupkgError` replace `KpkgResult` and `KpkgError`.
+  - The `new_app_naming` config default is now `APPNAME (irupkg)` -- existing `config.json` files with `APPNAME (kpkg)` continue to work unchanged.
+- `KANDJI_API_URL` --> `IRU_API_URL`, `KANDJI_TOKEN` --> `IRUPKG_TOKEN`. Update scripts, CI workflows, and `.env` files to use the new names; the legacy names still work but print a deprecation warning to stderr on each invocation.
+- `KANDJI_TOKEN_NAME` --> `IRUPKG_TOKEN_NAME`. The default token name is now `IRUPKG_TOKEN` (was `KANDJI_TOKEN`). Update the value stored in your keystore and any references in `config.json` or environment variables.
+- `KPKG_LOCAL_DIR` --> `IRUPKG_LOCAL_DIR`, `KPKG_CONFIG_DIR` --> `IRUPKG_CONFIG_DIR`. Update any scripts or CI workflows that set these variables; the legacy names still work but print a deprecation warning to stderr.
+- `config.json` top-level key `"kandji"` --> `"iru"`. Existing config files with `"kandji"` continue to work but print a deprecation warning to stderr; rename the key to silence it.
+- Default data directories: `~/Library/KandjiPackages` --> `~/Library/IruPackages` (macOS), `~/.local/share/kpkg` --> `~/.local/share/irupkg` (Linux). If only the old directory exists, irupkg continues to use it and prints a warning to stderr; move it to the new location to silence the warning.
+- macOS data directory: `~/Library/KandjiPackages` --> `~/Library/IruPackages`. One-shot migration runs automatically on `.pkg` upgrade and on first `irupkg-setup` invocation.
+- macOS LaunchAgent label: `io.kandji.kpkg.brewcron` --> `com.iru.irupkg.brewcron`. Prior agent is unloaded and removed automatically during migration.
+- macOS enforcement-delay plist: `/Library/Preferences/io.kandji.enforcement.delay.plist` --> `/Library/Preferences/com.iru.irupkg.enforcement.delay.plist`. Any in-flight enforcement delays recorded under the old path are not migrated; affected apps may re-prompt for enforcement once after upgrade.
+- macOS bundle ID: `io.kandji.kpkg` --> `com.iru.irupkg`.
+- `kpkg-setup` --> `irupkg-setup`. The `kpkg-setup` symlink is retained as a deprecated alias pointing at the same target.
+- Docker Linux OS user renamed: `kpkg` --> `irupkg`; WORKDIR `/kpkg` --> `/irupkg`; data directory `/home/kpkg/.local/share/kpkg` --> `/home/irupkg/.local/share/irupkg`. Rebuild the image after pulling.
+- `docker-compose.yml` service renamed: `kpkg-scheduler` --> `irupkg-scheduler`. Update any scripts or tooling that reference `docker compose up kpkg-scheduler`.
+- GitHub Actions workflow renamed: `kpkg-brew-scheduler.yml` --> `irupkg-brew-scheduler.yml`; env var `KPKG_LOCAL_DIR` --> `IRUPKG_LOCAL_DIR` in workflow env block.
+
 ## v.2.0.0
 ---
 #### **Breaking changes**:
@@ -50,7 +71,7 @@
 - Auto-config generation from environment variables now requires only `KANDJI_API_URL` (`ENV_KEYSTORE` no longer required as a separate trigger)
 - Modernized build tooling: `pyproject.toml` + `uv` replace the manual Python framework download in `build.zsh`
 - Consolidated the version source of truth: the wheel version is now read dynamically from the top-level `VERSION` file (no more duplicate `src/kpkg/resources/VERSION` or literal in `pyproject.toml` to keep in sync)
-- `audit_app_and_version.zsh` and `setup.zsh` are now bundled into the wheel/sdist (via a `kpkg.scripts` subpackage); `kpkg -p ...` and `kpkg --setup` materialize the packaged copies into `parent_dir` on first use when they're not already present, so `uv tool install git+https://github.com/kandji-inc/kpkg.git` is self-contained
+- `audit_app_and_version.zsh` and `setup.zsh` are now bundled into the wheel/sdist (via a `kpkg.scripts` subpackage); `kpkg -p ...` and `kpkg --setup` materialize the packaged copies into `parent_dir` on first use when they're not already present, so `uv tool install git+https://github.com/kandji-inc/irupkg.git` is self-contained
 - Improved Homebrew cache path detection: now uses `brew --cache --cask` + directory glob instead of fragile output string parsing
 - Added unit test suite (`tests/python/`) covering token retrieval, config parsing, API response validation, enforcement mapping, and app/library matching (`uv run pytest tests/python/`), plus bats coverage for `setup.zsh` argument parsing and helper functions (`tests/test_setup.bats`)
 

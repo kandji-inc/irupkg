@@ -34,7 +34,7 @@ zparseopts -D -E -a opts h -help a -addcask b -brewcron c -config i -idfind m -m
 # Set args for help and show message
 if (( ${opts[(I)(-h|--help)]} )); then
     /bin/cat <<EOF
-Usage: kpkg-setup [-h/--help|-a/--addcask|-b/--brewcron|-c/--config|-i/--idfind|-m/--map|-r/--reset|-u/--uninstall]
+Usage: irupkg-setup [-h/--help|-a/--addcask|-b/--brewcron|-c/--config|-i/--idfind|-m/--map|-r/--reset|-u/--uninstall]
 
 Conducts prechecks to ensure all required dependencies are available prior to runtime.
 Once confirmed, reads and prompts to populate values in config.json if any are invalid.
@@ -47,7 +47,7 @@ Options:
 -i, --idfind                     Populate to CSV names and ids of provided installer media (accepts .pkg/dmg or dir of .pkgs/dmgs)
 -m, --map                        Populate to CSV usable values for package_map.json
 -r, --reset                      Prompt to reset/overwrite configurable variables/secrets
--u, --uninstall                  Unload and remove agent from ~/Library/LaunchAgents/io.kandji.kpkg.brewcron.plist (must be paired with -b/--brewcron)
+-u, --uninstall                  Unload and remove agent from ~/Library/LaunchAgents/com.iru.irupkg.brewcron.plist (must be paired with -b/--brewcron); also boots out and removes legacy io.kandji.kpkg.brewcron if present
 EOF
     exit 0
 fi
@@ -69,29 +69,29 @@ config_name="config.json"
 # Hardcoded filename for configs
 config_file="${abs_dir}/${config_name}"
 
-# Resolve version: local VERSION file (dev/project root), then installed kpkg binary,
+# Resolve version: local VERSION file (dev/project root), then installed irupkg binary,
 # then find in src layout excluding build artifacts
 if [[ -f "${abs_dir}/VERSION" ]]; then
     version=$(< "${abs_dir}/VERSION")
-elif command -v kpkg >/dev/null 2>&1; then
-    version=$(kpkg --version 2>/dev/null | awk '{print $NF}')
+elif command -v irupkg >/dev/null 2>&1; then
+    version=$(irupkg --version 2>/dev/null | awk '{print $NF}')
 else
     version_path=$(find "${abs_dir}" -name VERSION -not -path "*/build/*" | head -1)
     [[ -n "${version_path}" ]] && version=$(< "${version_path}")
 fi
 
 # Set service name and pathing for LaunchAgent
-sv_name="io.kandji.kpkg.brewcron"
+sv_name="com.iru.irupkg.brewcron"
 user_agents="/Users/${user}/Library/LaunchAgents"
-kpkg_brewcron="${user_agents}/${sv_name}.plist"
+irupkg_brewcron="${user_agents}/${sv_name}.plist"
 # Hardcoded filename for configs
 bc_config_name="brew_cron.json"
 bc_config_file="${abs_dir}/${bc_config_name}"
 
-# RE matching for Kandji API URL
-kandji_api_re='^[A-Za-z0-9]+\.api(\.eu)?\.kandji\.io$'
+# RE matching for Iru API URL
+iru_api_re='^[A-Za-z0-9-]+\.api((\.eu)?\.kandji\.io|\.iru\.com)$'
 # xdigit is an RE pattern match for valid hex chars
-kandji_token_re='[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}'
+irupkg_token_re='[[:xdigit:]]{8}(-[[:xdigit:]]{4}){3}-[[:xdigit:]]{12}'
 slack_webhook_re='https://hooks.slack.com/services/[[:alnum:]]{9,11}/[[:alnum:]]{11}/[[:alnum:]]{24}'
 # Matching to confirm hours input is valid
 bc_frequency_hours_re='[[:digit:]]{1,4}'
@@ -155,8 +155,8 @@ function determine_media_type() {
 # Globals:
 #  config_file
 # Assigns:
-#  kandji_api
-#  kandji_token_name
+#  iru_api
+#  irupkg_token_name
 #  env_store
 #  keychain_store
 #  slack_enabled
@@ -164,8 +164,10 @@ function determine_media_type() {
 ##############################################
 function read_config() {
     # Read in configs and assign to vars
-    kandji_api=$(plutil -extract kandji.api_url raw -o - "${config_file}")
-    kandji_token_name=$(plutil -extract kandji.token_name raw -o - "${config_file}")
+    iru_api=$(plutil -extract iru.api_url raw -o - "${config_file}" 2>/dev/null) \
+        || iru_api=$(plutil -extract kandji.api_url raw -o - "${config_file}")
+    irupkg_token_name=$(plutil -extract iru.token_name raw -o - "${config_file}" 2>/dev/null) \
+        || irupkg_token_name=$(plutil -extract kandji.token_name raw -o - "${config_file}")
     # Ensure at least one enabled keystore val
     env_store=$(plutil -extract token_keystore.environment raw -o - "${config_file}")
     keychain_store=$(plutil -extract token_keystore.keychain raw -o - "${config_file}")
@@ -184,9 +186,9 @@ function read_config() {
 ##############################################
 function reset_values() {
     echo "\n$(date +'%r') : Running setup to reset existing values"
-    if ! ${reset_kandji_url}; then
-        reset_kandji_url=true
-        set_kandji_api_url
+    if ! ${reset_iru_url}; then
+        reset_iru_url=true
+        set_iru_api_url
     fi
     if ! ${reset_keystore}; then
         reset_keystore=true
@@ -194,13 +196,13 @@ function reset_values() {
     fi
     # Re-read config to update vars
     read_config
-    if [[ -n ${kandji_token_name} ]]; then
-        if ! ${reset_kandji_token}; then
-            token_type="Kandji"
+    if [[ -n ${irupkg_token_name} ]]; then
+        if ! ${reset_irupkg_token}; then
+            token_type="Iru"
             prompt_store_secret
         fi
     else
-        echo "$(date +'%r') : Kandji token name not defined in config!"
+        echo "$(date +'%r') : Iru token name not defined in config!"
         exit 1
     fi
 
@@ -220,8 +222,8 @@ function reset_values() {
 # If any are found to be invalid, prompts
 # user to populate interactively
 # Globals:
-#  kandji_api
-#  kandji_token_name
+#  iru_api
+#  irupkg_token_name
 #  env_store
 #  keychain_store
 #  slack_enabled
@@ -232,9 +234,9 @@ function reset_values() {
 ##############################################
 function prechecks() {
 
-    if [[ -z ${kandji_api} || $(grep "TENANT\.api" <<< ${kandji_api}) ]]; then
-        echo "\n$(date +'%r') : WARNING: No valid Kandji API URL defined in ${config_name}"
-        set_kandji_api_url
+    if [[ -z ${iru_api} || $(grep "TENANT\.api" <<< ${iru_api}) ]]; then
+        echo "\n$(date +'%r') : WARNING: No valid Iru API URL defined in ${config_name}"
+        set_iru_api_url
         # Re-read config to update var
         read_config
         # Re-run prechecks to validate change
@@ -254,11 +256,11 @@ function prechecks() {
         return
     fi
 
-    if [[ -n ${kandji_token_name} ]]; then
-        token_type="Kandji"
+    if [[ -n ${irupkg_token_name} ]]; then
+        token_type="Iru"
         prompt_store_secret
     else
-        echo "$(date +'%r') : CRITICAL: Kandji token name not defined in ${config_name}"
+        echo "$(date +'%r') : CRITICAL: Iru token name not defined in ${config_name}"
         exit 1
     fi
 
@@ -280,10 +282,10 @@ function prechecks() {
 ##############################################
 function assign_token_name() {
     case ${token_type} in
-        "Kandji")
-            token_name=${kandji_token_name}
-            secret_regex_pattern=${kandji_token_re}
-            reset_token="reset_kandji_token"
+        "Iru")
+            token_name=${irupkg_token_name}
+            secret_regex_pattern=${irupkg_token_re}
+            reset_token="reset_irupkg_token"
             ;;
         "Slack")
             token_name=${slack_token_name}
@@ -291,26 +293,32 @@ function assign_token_name() {
             reset_token="reset_slack_token"
             ;;
         *)
-            echo "$(date +'%r') : CRITICAL: Token type must be one of Kandji or Slack"
+            echo "$(date +'%r') : CRITICAL: Token type must be one of Iru or Slack"
             return 1
             ;;
     esac
 }
 
 ##############################################
-# Prompts interactively to set Kandji API URL
+# Prompts interactively to set Iru API URL
 # Once API URL is validated, writes to config
 # Globals:
-#  kandji_api_re
+#  iru_api_re
 #  config_file
 #  CONFIG_VALUE
 # Outputs:
 #  Writes input string to config.json
 ##############################################
-function set_kandji_api_url() {
-    value_regex_pattern=${kandji_api_re}
-    prompt_for_value "Kandji API URL" "INSTANCE.api(.eu).kandji.io"
-    plutil -replace kandji.api_url -string ${CONFIG_VALUE} -r "${config_file}"
+function set_iru_api_url() {
+    value_regex_pattern=${iru_api_re}
+    prompt_for_value "Iru API URL" "INSTANCE.api.iru.com or INSTANCE.api(.eu).kandji.io"
+    if plutil -extract iru.api_url raw -o - "${config_file}" &>/dev/null; then
+        plutil -replace iru.api_url -string ${CONFIG_VALUE} -r "${config_file}"
+    else
+        plutil -insert iru -dictionary -r "${config_file}" 2>/dev/null || true
+        plutil -insert iru.api_url -string ${CONFIG_VALUE} -r "${config_file}" 2>/dev/null \
+            || plutil -replace iru.api_url -string ${CONFIG_VALUE} -r "${config_file}"
+    fi
 }
 
 ##############################################
@@ -329,6 +337,7 @@ function set_keystore() {
     fi
     echo
     if read -q "?Use keychain for token storage? (Y/N):"; then
+
         plutil -replace token_keystore.keychain -bool true -r "${config_file}"
     else
         plutil -replace token_keystore.keychain -bool false -r "${config_file}"
@@ -422,7 +431,7 @@ function retrieve_token() {
         BEARER_TOKEN=${(P)token_name}
     fi
     if [[ -z ${BEARER_TOKEN} && ${keychain_store} == true ]]; then
-        BEARER_TOKEN=$(security find-generic-password -w -a "kpkg" -s ${token_name})
+        BEARER_TOKEN=$(security find-generic-password -w -a "irupkg" -s ${token_name})
     fi
 }
 
@@ -489,7 +498,7 @@ function check_set_reset_var() {
     if ${(P)reset_token}; then
         return 0
     fi
-    # Have to eval here because reset_token could be Kandji or Slack
+    # Have to eval here because reset_token could be Iru or Slack
     eval ${reset_token}=true
     return 1
 }
@@ -511,13 +520,13 @@ function check_store_keychain() {
     # Validate expected secrets are stored if using keychain
     if [[ ${keychain_store} == true ]]; then
         # Check if keychain value for name is undefined; also proceed is reset flag is set
-        if ! security find-generic-password -a "kpkg" -s ${token_name} >/dev/null 2>&1 || (( ${opts[(I)(-r|--reset)]} )); then
+        if ! security find-generic-password -a "irupkg" -s ${token_name} >/dev/null 2>&1 || (( ${opts[(I)(-r|--reset)]} )); then
             echo
             if (( ${opts[(I)(-r|--reset)]} )) && check_set_reset_var; then
                 return 0
             fi
-            if [[ ! -f "/Users/${user}/.local/bin/kpkg" ]]; then
-                echo "\n$(date +'%r') : WARNING: kpkg binary not found at expected path of /Users/${user}/.local/bin/kpkg"
+            if [[ ! -f "/Users/${user}/.local/bin/irupkg" ]]; then
+                echo "\n$(date +'%r') : WARNING: irupkg binary not found at expected path of /Users/${user}/.local/bin/irupkg"
                 echo "$(date +'%r') : Permanent installation is required for Keychain storage option"
                 echo "$(date +'%r') : Configure for ENV usage instead (run setup with -r/--reset and select ENV token storage)"
                 return 0
@@ -530,9 +539,10 @@ function check_store_keychain() {
                     echo "$(date +'%r') : ERROR: Unable to unlock keychain; exiting"
                     exit 1
                 fi
-                security add-generic-password -U -a "kpkg" -s "${token_name}" -w "${BEARER_TOKEN}" \
-                    -T "/usr/bin/security" -T "/Users/${user}/.local/bin/kpkg" \
-                    -T "/Users/${user}/Library/KandjiPackages/setup.zsh" ${user_keychain_path}
+                security add-generic-password -U -a "irupkg" -s "${token_name}" -w "${BEARER_TOKEN}" \
+                    -T "/usr/bin/security" -T "/Users/${user}/.local/bin/irupkg" \
+                    -T "/Users/${user}/Library/IruPackages/setup.zsh" \
+                    ${user_keychain_path}
                 check_store_keychain
             fi
         else
@@ -739,13 +749,13 @@ function write_install_media_ids_to_csv() {
 
 ##############################################
 # Populates values for custom apps and Self
-# Service categories; calls Kandji API to get
+# Service categories; calls Iru API to get
 # custom apps and Self Service categories
 # Outputs:
 #  Writes to package_map_values.csv
 #  Opens package_map_values.csv in default CSV viewer
 # Globals:
-#  kandji_api
+#  iru_api
 #  api_token
 # Outputs:
 #  Writes package_map_values.csv to disk
@@ -756,17 +766,17 @@ function populate_values_for_map() {
     declare -a custom_apps ss_categories
 
     # Define API endpoints
-    custom_apps_api="${kandji_api}/api/v1/library/custom-apps"
-    self_service_api="${kandji_api}/api/v1/self-service/categories"
-    retrieve_token "${kandji_token_name}"
+    custom_apps_api="${iru_api}/api/v1/library/custom-apps"
+    self_service_api="${iru_api}/api/v1/self-service/categories"
+    retrieve_token "${irupkg_token_name}"
     if [[ -z ${BEARER_TOKEN} ]]; then
-        echo "$(date +'%r') : WARNING: Valid Kandji token not found!"
-        if read -q "?Provide Kandji token now for mapping? (Y/N):"; then
-            token_type="Kandji"
+        echo "$(date +'%r') : WARNING: Valid Iru token not found!"
+        if read -q "?Provide Iru token now for mapping? (Y/N):"; then
+            token_type="Iru"
             assign_token_name
             prompt_for_secret
         else
-            echo "\n$(date +'%r') : CRITICAL: Kandji token not found in ENV or keychain!"
+            echo "\n$(date +'%r') : CRITICAL: Iru token not found in ENV or keychain!"
             echo "$(date +'%r') : CRITICAL: Please provide a valid token when prompted\nAlternatively, run ./setup.zsh -r to repopulate your config"
             exit 1
         fi
@@ -774,11 +784,11 @@ function populate_values_for_map() {
     echo "$(date +'%r') : Populating available Custom Apps and Self Service categories..."
     echo "$(date +'%r') : Once package_map_values.csv is written, it will open in your default CSV viewer"
     echo "$(date +'%r') : Fill out package_map.json using values from created CSV"
-    kandji_token=${BEARER_TOKEN}
+    irupkg_token=${BEARER_TOKEN}
 
     # Populate custom app and Self Service category arrays
-    custom_apps_out=$(curl -s -L -X GET -H 'Content-Type application/json' -H "Authorization: Bearer ${kandji_token}" "${custom_apps_api}")
-    ss_categories_out=$(curl -s -L -X GET -H 'Content-Type application/json' -H "Authorization: Bearer ${kandji_token}" "${self_service_api}")
+    custom_apps_out=$(curl -s -L -X GET -H 'Content-Type application/json' -H "Authorization: Bearer ${irupkg_token}" "${custom_apps_api}")
+    ss_categories_out=$(curl -s -L -X GET -H 'Content-Type application/json' -H "Authorization: Bearer ${irupkg_token}" "${self_service_api}")
     # Get counts of custom apps and Self Service categories for iteration
     custom_app_count=$(plutil -extract results raw -o - - <<< ${custom_apps_out})
     ss_category_count=$(plutil -convert raw -o - - <<< ${ss_categories_out})
@@ -840,17 +850,17 @@ function populate_values_for_map() {
 function set_bc_freq() {
 
     value_regex_pattern=${bc_frequency_hours_re}
-    prompt_for_value "how frequently cron brew should run (in hours)" "1 – 168"
+    prompt_for_value "how frequently cron brew should run (in hours)" "1 - 168"
     periodic_hours=${CONFIG_VALUE}
 
     if [[ ${periodic_hours} -gt 0 ]]; then
-        echo "$(date +'%r') : kpkg brew cron will run every ${periodic_hours} hours"
+        echo "$(date +'%r') : irupkg brew cron will run every ${periodic_hours} hours"
         return 0
     else
         echo "\n$(date +'%r') : Provided value did not match expected sequence!"
         echo "$(date +'%r') : Number of hours should be greater than 0"
         echo "$(date +'%r') : Validate your input and try again; press CTRL+C to exit"
-        prompt_for_value "how frequently cron brew should run (in hours)" "1 – 168"
+        prompt_for_value "how frequently cron brew should run (in hours)" "1 - 168"
     fi
 }
 
@@ -988,13 +998,13 @@ function validate_casks() {
 }
 
 ##############################################
-# Converts casks arr into kpkg runtime string
+# Converts casks arr into irupkg runtime string
 # Converts periodic runtime into seconds
 # Creates dir at ~/Library/LaunchAgents and
 # creates/updates lagent plist in dir
 # Globals:
 #   casks
-#   kpkg_brewcron
+#   irupkg_brewcron
 #   periodic_hours
 #   sv_name
 #   user_agents
@@ -1003,14 +1013,14 @@ function validate_casks() {
 ##############################################
 function create_bootstrap_agent() {
 
-    # Format casks for kpkg (sort, unique, lowercase)
-    kpkg_fmt_casks=$(printf ' -b %s' ${(ou)casks[@]:l})
+    # Format casks for irupkg (sort, unique, lowercase)
+    irupkg_fmt_casks=$(printf ' -b %s' ${(ou)casks[@]:l})
     # Turn hours into seconds
     periodic_seconds=$((periodic_hours * 3600))
 
     mkdir -p "${user_agents}"
 
-    /bin/cat > "${kpkg_brewcron}" <<EOF
+    /bin/cat > "${irupkg_brewcron}" <<EOF
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
     <plist version="1.0">
@@ -1026,7 +1036,7 @@ function create_bootstrap_agent() {
             <array>
                 <string>zsh</string>
                 <string>-c</string>
-                <string>/Users/${user}/.local/bin/kpkg${kpkg_fmt_casks}</string>
+                <string>/Users/${user}/.local/bin/irupkg${irupkg_fmt_casks}</string>
             </array>
             <key>RunAtLoad</key>
             <true/>
@@ -1042,7 +1052,7 @@ EOF
 # status; if lagent plist exists, removes it
 # Otherwise, warns that file not found
 # Globals:
-#   kpkg_brewcron
+#   irupkg_brewcron
 #   sv_name
 #   uid
 # Outputs:
@@ -1054,11 +1064,11 @@ function bootout_remove_agent() {
     else
         echo "$(date +'%r') : Successfully stopped service gui/${uid}/${sv_name}"
     fi
-    if [[ -f "${kpkg_brewcron}" ]]; then
-        rm -f "${kpkg_brewcron}"
-        echo "$(date +'%r') : Successfully removed ${kpkg_brewcron}"
+    if [[ -f "${irupkg_brewcron}" ]]; then
+        rm -f "${irupkg_brewcron}"
+        echo "$(date +'%r') : Successfully removed ${irupkg_brewcron}"
     else
-        echo "$(date +'%r') : WARNING: ${kpkg_brewcron} not found"
+        echo "$(date +'%r') : WARNING: ${irupkg_brewcron} not found"
     fi
 }
 
@@ -1067,7 +1077,7 @@ function bootout_remove_agent() {
 # to bootstrap; if unsuccessful, retries once
 # Prints command to monitor log if desired
 # Globals:
-#   kpkg_brewcron
+#   irupkg_brewcron
 #   sv_name
 #   uid
 # Arguments:
@@ -1081,27 +1091,89 @@ function agent_perms_load() {
 
     retry=${1}
 
-    chmod 644 "${kpkg_brewcron}"
-    chown ${user}:staff "${kpkg_brewcron}"
-    echo "$(date +'%r') : Wrote service with above casks scoped to ${kpkg_brewcron}"
-    if ! launchctl bootstrap "gui/${uid}" "${kpkg_brewcron}" >/dev/null 2>&1; then
-        launchctl bootout "gui/${uid}/${sv_name}" && launchctl bootstrap "gui/${uid}" "${kpkg_brewcron}"
+    chmod 644 "${irupkg_brewcron}"
+    chown ${user}:staff "${irupkg_brewcron}"
+    echo "$(date +'%r') : Wrote service with above casks scoped to ${irupkg_brewcron}"
+    if ! launchctl bootstrap "gui/${uid}" "${irupkg_brewcron}" >/dev/null 2>&1; then
+        launchctl bootout "gui/${uid}/${sv_name}" && launchctl bootstrap "gui/${uid}" "${irupkg_brewcron}"
     fi
     if launchctl print "gui/${uid}/${sv_name}" >/dev/null 2>&1; then
-        echo "$(date +'%r') : Successfully bootstrapped ${kpkg_brewcron} — service is now active"
-        echo "$(date +'%r') : Run the following to monitor progress (CTRL+C to quit):\ntail -f ~/Library/KandjiPackages/kpkg.log"
+        echo "$(date +'%r') : Successfully bootstrapped ${irupkg_brewcron} -- service is now active"
+        echo "$(date +'%r') : Run the following to monitor progress (CTRL+C to quit):\ntail -f ~/Library/IruPackages/irupkg.log"
     elif ! ${retry}; then
-        echo "$(date +'%r') : WARNING: Unable to bootstrap ${kpkg_brewcron}... Trying once more"
+        echo "$(date +'%r') : WARNING: Unable to bootstrap ${irupkg_brewcron}... Trying once more"
         agent_perms_load true
     else
-        echo "$(date +'%r') : ERROR: Unable to bootstrap ${kpkg_brewcron} (tried twice)... Exiting"
+        echo "$(date +'%r') : ERROR: Unable to bootstrap ${irupkg_brewcron} (tried twice)... Exiting"
         exit 1
     fi
 }
 
 ##############################################
-# Checks config; assigns name of Kandji token
-# and optional Slack token; if Kandji token
+# Idempotent one-shot migration from legacy
+# KandjiPackages / io.kandji.kpkg state.
+# Called unconditionally at top of main().
+##############################################
+function migrate_from_legacy() {
+    local legacy_dir="${HOME}/Library/KandjiPackages"
+    local new_dir="${HOME}/Library/IruPackages"
+    local legacy_agent="io.kandji.kpkg.brewcron"
+    local legacy_plist="${HOME}/Library/LaunchAgents/${legacy_agent}.plist"
+
+    # Data dir migration
+    if [[ -d "${legacy_dir}" && ! -d "${new_dir}" ]]; then
+        echo "$(date +'%r') : Migrating ${legacy_dir} --> ${new_dir}"
+        mv "${legacy_dir}" "${new_dir}"
+    elif [[ -d "${legacy_dir}" && -d "${new_dir}" ]]; then
+        echo "$(date +'%r') : Merging missing files from ${legacy_dir} into ${new_dir}"
+        if rsync -a --ignore-existing "${legacy_dir}/" "${new_dir}/"; then
+            rm -rf "${legacy_dir}"
+        fi
+    fi
+
+    # LaunchAgent migration
+    if [[ -f "${legacy_plist}" ]]; then
+        echo "$(date +'%r') : Booting out legacy LaunchAgent ${legacy_agent}"
+        launchctl bootout "gui/$(id -u)/${legacy_agent}" 2>/dev/null
+        rm -f "${legacy_plist}"
+    fi
+
+    # Keychain migration (best-effort; only when keychain storage is configured)
+    local keychain_configured
+    keychain_configured=$(plutil -extract token_keystore.keychain raw -o - "${config_file}" 2>/dev/null)
+    if [[ "${keychain_configured}" == "true" ]]; then
+        local kname sname val keychain_unlocked=false
+        kname=$(plutil -extract iru.token_name raw -o - "${config_file}" 2>/dev/null) \
+            || kname=$(plutil -extract kandji.token_name raw -o - "${config_file}" 2>/dev/null) \
+            || kname="KANDJI_TOKEN"
+        sname=$(plutil -extract slack.webhook_name raw -o - "${config_file}" 2>/dev/null) || sname="SLACK_TOKEN"
+        for svc in "${kname}" "${sname}"; do
+            [[ -z "${svc}" ]] && continue
+            val=$(security find-generic-password -a "kpkg" -s "${svc}" -w "${user_keychain_path}" 2>/dev/null) || continue
+            if [[ "${keychain_unlocked}" != true ]]; then
+                if ! security unlock-keychain -u "${user_keychain_path}" 2>/dev/null; then
+                    echo "$(date +'%r') : WARNING: Could not unlock keychain; skipping keychain migration"
+                    break
+                fi
+                keychain_unlocked=true
+            fi
+            if security add-generic-password -U -a "irupkg" -s "${svc}" -w "${val}" \
+                    -T "/usr/bin/security" \
+                    -T "${HOME}/.local/bin/irupkg" \
+                    -T "${HOME}/Library/IruPackages/setup.zsh" \
+                    "${user_keychain_path}" 2>/dev/null; then
+                security delete-generic-password -a "kpkg" -s "${svc}" "${user_keychain_path}" 2>/dev/null
+                echo "$(date +'%r') : Migrated keychain entry ${svc} --> irupkg account"
+            else
+                echo "$(date +'%r') : WARNING: Could not migrate keychain entry ${svc} (re-run setup to retry)"
+            fi
+        done
+    fi
+}
+
+##############################################
+# Checks config; assigns name of Iru token
+# and optional Slack token; if Iru token
 # undefined in config, returns 1 for err
 # Validates defined tokens are placed in
 # designated keystore(s) and if not found,
@@ -1110,7 +1182,7 @@ function agent_perms_load() {
 #   config_file
 # Assigns:
 #   token_type
-#   kandji_token_name
+#   irupkg_token_name
 #   slack_token_name
 ##############################################
 # shellcheck disable=SC2120
@@ -1122,19 +1194,21 @@ function main() {
     fi
 
     if [[ "${EUID}" -eq 0 ]]; then
-        echo "$(date +'%r') : kpkg-setup should NOT be run as superuser! Exiting..."
+        echo "$(date +'%r') : irupkg-setup should NOT be run as superuser! Exiting..."
         exit 1
     fi
 
-    format_stdout "Kandji Packages (kpkg) Setup (${version})"
+    migrate_from_legacy
+
+    format_stdout "Iru Packages (irupkg) Setup (${version})"
     # Check opts array to ensure no arguments are passed in
     if [[ -z $(printf '%s\n' "${(@)opts}") ]]; then
         # No args is default program
-        format_stdout "kpkg Initial Setup"
+        format_stdout "irupkg Initial Setup"
     fi
 
     ######################
-    # kpkg Brew Cron
+    # irupkg Brew Cron
     ######################
     # Ensure any passed -a/-u flags are used with -b
     if [[ -n $(printf '%s\n' "${(@)opts}" | grep -- '-a\|-u') ]] && [[ -z $(printf '%s\n' "${(@)opts}" | grep -- '-b') ]]; then
@@ -1147,11 +1221,11 @@ function main() {
 
     if (( ${opts[(I)(-b|--brewcron)]} )); then
         if (( ${opts[(I)(-u|--uninstall)]} )); then
-            format_stdout "kpkg Brew Cron Uninstallation"
+            format_stdout "irupkg Brew Cron Uninstallation"
             bootout_remove_agent
             exit 0
         fi
-        format_stdout "kpkg Brew Cron Starting"
+        format_stdout "irupkg Brew Cron Starting"
         if ! brew --version >/dev/null 2>&1; then
             echo "$(date +'%r') : ERROR: Confirm Homebrew is installed/available in PATH and try again..."
             exit 1
@@ -1167,7 +1241,7 @@ function main() {
         fi
         create_bootstrap_agent
         agent_perms_load false
-        format_stdout "kpkg Brew Cron Complete"
+        format_stdout "irupkg Brew Cron Complete"
         exit 0
     fi
 
@@ -1175,45 +1249,45 @@ function main() {
     read_config
 
     ######################
-    # kpkg Install ID
+    # irupkg Install ID
     ######################
     if (( ${opts[(I)(-i|--idfind)]} )); then
-        format_stdout "kpkg Install ID Lookup Starting"
+        format_stdout "irupkg Install ID Lookup Starting"
         prompt_validate_pkg_pkgs
-        format_stdout "kpkg Install ID Lookup Complete"
+        format_stdout "irupkg Install ID Lookup Complete"
         exit 0
     fi
 
     ######################
-    # kpkg Mapping
+    # irupkg Mapping
     ######################
     if (( ${opts[(I)(-m|--map)]} )); then
-        format_stdout "kpkg Mapping Starting"
+        format_stdout "irupkg Mapping Starting"
         populate_values_for_map
-        format_stdout "kpkg Mapping Complete"
+        format_stdout "irupkg Mapping Complete"
         exit 0
     fi
 
     ######################
-    # kpkg Reset
+    # irupkg Reset
     ######################
     if (( ${opts[(I)(-r|--reset)]} )); then
-        format_stdout "kpkg Reset Starting"
-        reset_kandji_url=false
+        format_stdout "irupkg Reset Starting"
+        reset_iru_url=false
         reset_keystore=false
-        reset_kandji_token=false
+        reset_irupkg_token=false
         reset_slack_token=false
         reset_values
-        format_stdout "kpkg Reset Complete"
+        format_stdout "irupkg Reset Complete"
         exit 0
     fi
 
     ######################
-    # kpkg Config Only
+    # irupkg Config Only
     ######################
     # If flag is set for config-only, don't offer to store secrets
     if (( ${opts[(I)(-c|--config)]} )); then
-        format_stdout "kpkg Config Only"
+        format_stdout "irupkg Config Only"
         config_only=true
     else
         config_only=false
@@ -1222,11 +1296,11 @@ function main() {
     # Run prechecks to validate config file and on-disk
     prechecks
 
-    format_stdout "kpkg Setup Complete"
+    format_stdout "irupkg Setup Complete"
 }
 
 ###############
 ##### MAIN ####
 ###############
 
-[[ $ZSH_EVAL_CONTEXT != *:file* ]] && main
+[[ ${ZSH_EVAL_CONTEXT} != *:file* ]] && main

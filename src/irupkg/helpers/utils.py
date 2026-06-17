@@ -60,7 +60,9 @@ from packaging import version as packaging_version
 
 log = logging.getLogger(__name__)
 
-# Bound every outbound HTTP call so a hung upstream (Kandji/Slack/brew.sh) can't
+_warned_legacy_keychain: set[str] = set()
+
+# Bound every outbound HTTP call so a hung upstream (Iru/Slack/brew.sh) can't
 # stall the scheduler loop indefinitely. requests defaults to no timeout.
 HTTP_TIMEOUT = 30
 
@@ -117,7 +119,7 @@ def sha256_file(file_path):
 
 
 class Utilities:
-    """Class to hold utility functions for Kandji Custom App creation and management"""
+    """Class to hold utility functions for Iru Custom App creation and management"""
 
     #####################################
     ######### PRIVATE FUNCTIONS #########
@@ -274,7 +276,7 @@ class Utilities:
                 self.audit_script_path = str(path)
                 return
         try:
-            packaged = importlib.resources.files("kpkg.scripts").joinpath(self.audit_script)
+            packaged = importlib.resources.files("irupkg.scripts").joinpath(self.audit_script)
             with importlib.resources.as_file(packaged) as src:
                 os.makedirs(os.path.dirname(self.audit_script_path), exist_ok=True)
                 shutil.copy(src, self.audit_script_path)
@@ -283,7 +285,7 @@ class Utilities:
             pass
         raise FileNotFoundError(
             f"Audit script not found at {self.audit_script_path}. "
-            "Set KPKG_LOCAL_DIR to the repo root, set KPKG_CONFIG_DIR to a directory "
+            "Set IRUPKG_LOCAL_DIR to the repo root, set IRUPKG_CONFIG_DIR to a directory "
             "containing audit_app_and_version.zsh, or copy the script there manually."
         )
 
@@ -302,9 +304,25 @@ class Utilities:
 
     def _keychain_token_get(self, item_name):
         """Retrieves and returns a secret stored at `item_name` in the keychain"""
-        shell_cmd = f"/usr/bin/security find-generic-password -w -s {item_name} -a 'kpkg'"
-        decoded_out = self._run_command(shell_cmd)
-        return decoded_out if decoded_out is not False else None
+        decoded_out = self._run_command(
+            f"/usr/bin/security find-generic-password -w -s {item_name} -a 'irupkg'"
+        )
+        if decoded_out is not False:
+            return decoded_out
+        # Fall back to legacy 'kpkg' account for users who haven't run migrate_from_legacy yet
+        decoded_out = self._run_command(
+            f"/usr/bin/security find-generic-password -w -s {item_name} -a 'kpkg'"
+        )
+        if decoded_out is not False:
+            if item_name not in _warned_legacy_keychain:
+                _warned_legacy_keychain.add(item_name)
+                print(
+                    f"warning: keychain token '{item_name}' found under legacy 'kpkg' account; "
+                    "run 'irupkg --setup' to migrate it to the 'irupkg' account",
+                    file=sys.stderr,
+                )
+            return decoded_out
+        return None
 
     def _retrieve_token(self, item_name):
         """Return token by name, searching configured keystores then falling back to ENV on non-Darwin platforms."""
@@ -762,7 +780,7 @@ class Utilities:
     ######################
 
     def _find_lib_item_match(self):
-        """Searches for custom app to update from existing items in Kandji library
+        """Searches for custom app to update from existing items in Iru library
         If none match, attempts to find custom app dynamically by PKG name similarity
         if more than one match found, collates metadata for matches and reports to Slack with error"""
         # Locate custom app by name
@@ -827,7 +845,7 @@ class Utilities:
             return False
 
     def _find_lib_item_dynamic(self, possible_apps={}):
-        """Uses SequenceMatcher to find most similarly named PKG in Kandji to the newly built PKG
+        """Uses SequenceMatcher to find most similarly named PKG in Iru to the newly built PKG
         Requires a minimum ratio of .8 suggesting high probability of match; takes matching PKGs
         and filters out any not matching the existing LI name (if provided); sorts by semantic version
         and if multiple matches found, iterates to find oldest Custom App entry and assigns as selection"""
@@ -837,7 +855,7 @@ class Utilities:
         ####################
         # Define a function to parse the datetime strings
         def parse_dt(dt_str):
-            """Parses datetime strings from Kandji API into datetime objects"""
+            """Parses datetime strings from Iru API into datetime objects"""
             try:
                 return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S.%fZ").astimezone()
             except ValueError:

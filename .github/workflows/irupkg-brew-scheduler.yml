@@ -1,35 +1,38 @@
-name: kpkg brew scheduler
+name: irupkg brew scheduler
 
-# Periodically refreshes Homebrew cask formulas and runs kpkg against the
-# casks listed in brew_cron.json, uploading any updated installer to Kandji.
-# Mirrors the docker-compose scheduler for environments where running a
-# long-lived container is not preferred.
+# Periodically refreshes Homebrew cask formulas and runs irupkg against the
+# casks listed in irupkg/brew_cron.json, uploading any updated
+# installer to Iru. Mirrors the docker-compose scheduler for environments
+# where running a long-lived container is not preferred.
 
 on:
   # schedule:
   #   # Every two hours. Adjust as needed; balance freshness vs CI minutes.
-  #   - cron: '0 */2 * * *'
+  #  - cron: '0 */2 * * *'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: kpkg-brew-scheduler
+  group: irupkg-brew-scheduler
   cancel-in-progress: false
 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: irupkg
     env:
-      KANDJI_API_URL: ${{ secrets.KANDJI_API_URL }}
-      KANDJI_TOKEN: ${{ secrets.KANDJI_TOKEN }}
+      IRU_API_URL: ${{ secrets.IRU_API_URL }}
+      IRUPKG_TOKEN: ${{ secrets.IRUPKG_TOKEN }}
       SLACK_TOKEN: ${{ secrets.SLACK_TOKEN }}
       # Keep config.json + audit_app_and_version.zsh resolution co-located
-      # with the checked-out source so kpkg doesn't try to read/write under $HOME.
-      KPKG_LOCAL_DIR: ${{ github.workspace }}
+      # with the checked-out source so irupkg doesn't try to read/write under $HOME.
+      IRUPKG_LOCAL_DIR: ${{ github.workspace }}/irupkg
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install uv
         uses: astral-sh/setup-uv@v6
@@ -69,9 +72,9 @@ jobs:
         # upstream is currently serving, causing spurious re-uploads.
         run: brew update
 
-      - name: Run kpkg against configured casks
+      - name: Run irupkg against configured casks
         run: |
           casks=$(jq -r '.brew_casks | map("-b " + .) | join(" ")' brew_cron.json)
-          echo "Running: kpkg ${casks}"
+          echo "Running: irupkg ${casks}"
           # shellcheck disable=SC2086
-          uv run kpkg ${casks} 
+          uv run irupkg ${casks}

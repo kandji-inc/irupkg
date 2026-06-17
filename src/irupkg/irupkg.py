@@ -1,6 +1,7 @@
 # Created 03/05/24; NRJA
 # Updated 04/15/24; NRJA
 # Updated 05/21/24; NRJA
+# Updated 06/03/26; kandji-danielchapa
 ################################################################################################
 # License Information
 ################################################################################################
@@ -25,7 +26,7 @@
 #
 ################################################################################################
 
-"""Kandji Packages (kpkg): standalone tool for programmatic management of Kandji Custom Apps"""
+"""Iru Packages (irupkg): standalone tool for programmatic management of Iru Custom Apps"""
 
 #######################
 ####### IMPORTS #######
@@ -57,13 +58,22 @@ from .helpers.utils import HTTP_TIMEOUT, Utilities, env_keystore_enabled, sha256
 
 log = logging.getLogger(__name__)
 
+_warned_legacy: bool = False
+
+##############################
+######### BRANDING ###########
+##############################
+
+CLI_NAME = "irupkg"
+CLI_BRANDING = "Iru Packages"
+
 ##############################
 ######### EXCEPTIONS #########
 ##############################
 
 
-class KpkgError(Exception):
-    """Raised for expected kpkg runtime errors (bad input, missing config, etc.)."""
+class IrupkgError(Exception):
+    """Raised for expected irupkg runtime errors (bad input, missing config, etc.)."""
 
 
 #############################
@@ -72,12 +82,12 @@ class KpkgError(Exception):
 
 
 @dataclass
-class KpkgResult:
-    """Outcome of a single kpkg processing run.
+class IrupkgResult:
+    """Outcome of a single irupkg processing run.
 
     `source` is the original input (a PKG/DMG/ZIP path or a Homebrew cask name).
     `action` is "succeeded" on a normal run, "dry_run" when dry mode was set,
-    or "failed" on any error. `pkg_name` is the resolved Kandji Custom App name
+    or "failed" on any error. `pkg_name` is the resolved Iru Custom App name
     when known, and `error` carries the stringified exception on failure.
     """
 
@@ -89,7 +99,7 @@ class KpkgResult:
 
 @dataclass
 class PackageOptions:
-    """CLI options passed through to KPKG for a single package run."""
+    """CLI options passed through to irupkg for a single package run."""
 
     name: str | None = None
     testname: str | None = None
@@ -102,8 +112,8 @@ class PackageOptions:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kpkg",
-        description="Kandji Packages: standalone tool for programmatic management of Kandji Custom Apps",
+        prog=CLI_NAME,
+        description=f"{CLI_BRANDING}: standalone tool for programmatic management of Iru Custom Apps",
     )
     parser.add_argument(
         "-p",
@@ -111,7 +121,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         required=False,
         metavar="PATH",
-        help="Path to PKG/DMG/ZIP for Kandji upload; multiple items can be specified so long as no name/category flags (-n/-t/-s/-z) are passed",
+        help="Path to PKG/DMG/ZIP for Iru upload; multiple items can be specified so long as no name/category flags (-n/-t/-s/-z) are passed",
     )
     parser.add_argument(
         "-b",
@@ -134,28 +144,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--name",
         action="store",
         required=False,
-        help="Name of Kandji Custom App to create/update",
+        help="Name of Iru Custom App to create/update",
     )
     parser.add_argument(
         "-t",
         "--testname",
         action="store",
         required=False,
-        help="Name of Kandji Custom App (test) to create/update",
+        help="Name of Iru Custom App (test) to create/update",
     )
     parser.add_argument(
         "-s",
         "--sscategory",
         action="store",
         required=False,
-        help="Kandji Self Service category aligned with --name",
+        help="Iru Self Service category aligned with --name",
     )
     parser.add_argument(
         "-z",
         "--zzcategory",
         action="store",
         required=False,
-        help="Kandji Self Service category aligned with --testname",
+        help="Iru Self Service category aligned with --testname",
     )
     parser.add_argument(
         "-c",
@@ -179,7 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         required=False,
         default=False,
-        help="Returns the current version of Kandji Packages and exits",
+        help=f"Returns the current version of {CLI_BRANDING} and exits",
     )
     parser.add_argument(
         "-S",
@@ -195,7 +205,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         required=False,
         default=False,
-        help="Sets dry run, returning (not executing) changes to stdout as they would have been made in Kandji",
+        help="Sets dry run, returning (not executing) changes to stdout as they would have been made in Iru",
     )
     return parser
 
@@ -208,25 +218,25 @@ def format_stdout(body):
     return hashed_out
 
 
-class KPKG(Configurator, Utilities):
+class Irupkg(Configurator, Utilities):
     def __init__(
         self,
         path_to_pkg: str,
         opts: PackageOptions | None = None,
         parent_dir: Path | None = None,
     ) -> None:
-        """Creates an object for Kandji API interaction.
+        """Creates an object for Iru API interaction.
 
         Args:
             path_to_pkg: Path to the PKG/DMG/ZIP to upload.
             opts: Upload options. Defaults to PackageOptions() with all defaults.
-            parent_dir: kpkg config/data directory. Defaults to the same resolution
-                as the CLI: KPKG_LOCAL_DIR -> KPKG_CONFIG_DIR -> macOS dir -> platform default.
+            parent_dir: irupkg config/data directory. Defaults to the same resolution
+                as the CLI: IRUPKG_LOCAL_DIR --> KPKG_LOCAL_DIR --> IRUPKG_CONFIG_DIR --> KPKG_CONFIG_DIR --> macOS dir --> platform default.
         """
         if path_to_pkg is None:
-            raise KpkgError("No PKG path provided (use flag -p/--pkg)")
+            raise IrupkgError("No PKG path provided (use flag -p/--pkg)")
         if not os.path.exists(path_to_pkg):
-            raise KpkgError(f"Provided path '{path_to_pkg}' does not exist!")
+            raise IrupkgError(f"Provided path '{path_to_pkg}' does not exist!")
         opts = opts or PackageOptions()
         self.arg_pkg_path = path_to_pkg
         self.parent_dir = parent_dir if parent_dir is not None else _resolve_parent_dir()
@@ -247,20 +257,20 @@ class KPKG(Configurator, Utilities):
         cask_name: str,
         opts: PackageOptions | None = None,
         parent_dir: Path | None = None,
-    ) -> "KPKG":
-        """Fetch a Homebrew cask and return a KPKG instance ready to process it.
+    ) -> "Irupkg":
+        """Fetch a Homebrew cask and return an Irupkg instance ready to process it.
 
         Args:
             cask_name: Homebrew cask name (e.g. "firefox").
             opts: Upload options. Defaults to PackageOptions() with all defaults.
-            parent_dir: kpkg config/data directory. Auto-resolved when not provided.
+            parent_dir: irupkg config/data directory. Auto-resolved when not provided.
 
         Raises:
-            KpkgError: If the cask cannot be fetched.
+            IrupkgError: If the cask cannot be fetched.
         """
         path = source_from_brew(cask_name)
         if path is None:
-            raise KpkgError(f"Failed to fetch Homebrew cask '{cask_name}'")
+            raise IrupkgError(f"Failed to fetch Homebrew cask '{cask_name}'")
         return cls(path_to_pkg=path, opts=opts, parent_dir=parent_dir)
 
     ####################################
@@ -350,7 +360,7 @@ class KPKG(Configurator, Utilities):
         Runs command and validates output when returning self._validate_response()"""
 
         def get_custom_apps():
-            """Queries all custom apps from Kandji tenant; assigns GET URL to var for cURL execution
+            """Queries all custom apps from Iru tenant; assigns GET URL to var for cURL execution
             Runs command and validates output when returning self._validate_response()"""
             get_url = self.api_custom_apps_url
             response = requests.get(get_url, headers=self.auth_headers, timeout=HTTP_TIMEOUT)
@@ -404,9 +414,9 @@ class KPKG(Configurator, Utilities):
             update_data["unzip_location"] = self.unzip_location
         # Validate enforcement of existing LI
         if lib_item_enforcement == "continuously_enforce":
-            # If existing LI enforcement differs from set value, override var to Kandji value
+            # If existing LI enforcement differs from set value, override var to Iru value
             if self.custom_app_enforcement != lib_item_enforcement:
-                log.info("Existing app enforcement differs from local config... Deferring to Kandji enforcement type")
+                log.info("Existing app enforcement differs from local config... Deferring to Iru enforcement type")
                 # This info is needed for auditing/enforcement, so split the PKG and find if req values unset
                 try:
                     self.app_vers
@@ -431,7 +441,7 @@ class KPKG(Configurator, Utilities):
         )
         return self._validate_response(response, "update")
 
-    def kandji_customize_create_update(self):
+    def iru_customize_create_update(self):
         """Parent function to process any audit script updates and
         either create a net new or update an existing custom app"""
         if self.custom_app_enforcement == "continuously_enforce":
@@ -444,14 +454,14 @@ class KPKG(Configurator, Utilities):
             self.update_custom_app()
         self._restore_audit() if self.custom_app_enforcement == "continuously_enforce" else True
 
-    def main(self) -> KpkgResult:
-        """Main function to execute KPKG.
+    def main(self) -> IrupkgResult:
+        """Main function to execute irupkg.
 
-        Returns a KpkgResult summarising the run. Failures are captured into
+        Returns an IrupkgResult summarising the run. Failures are captured into
         the result rather than raised, so callers can branch on result.action.
         """
         source = self.arg_pkg_path
-        result = KpkgResult(source=source)
+        result = IrupkgResult(source=source)
         self.skipped_iterations = 0
         try:
             try:
@@ -461,7 +471,7 @@ class KPKG(Configurator, Utilities):
                 result.error = str(exc)
                 return result
             # Reads config and assigns needed vars for runtime
-            # Also validates and populates values for Kandji/Slack (if defined)
+            # Also validates and populates values for Iru/Slack (if defined)
             self.populate_from_config()
             self.audit_script_path = os.path.join(self.parent_dir, self.audit_script)
 
@@ -483,7 +493,7 @@ class KPKG(Configurator, Utilities):
                 else:
                     self.test_app, self.prod_app = False, False
                 # Main func for processing Cr/Up ops
-                self.kandji_customize_create_update()
+                self.iru_customize_create_update()
             result.pkg_name = getattr(self, "custom_app_name", None) or getattr(self, "pkg_name", None)
             if getattr(self, "dry_run", False):
                 result.action = "dry_run"
@@ -495,7 +505,7 @@ class KPKG(Configurator, Utilities):
         except Exception as exc:
             result.action = "failed"
             result.error = str(exc) or exc.__class__.__name__
-            log.exception("kpkg run failed")
+            log.exception("irupkg run failed")
         finally:
             # Clean up copied PKG if it exists
             if hasattr(self, "copied_pkg_path") and self.copied_pkg_path is not None:
@@ -520,20 +530,71 @@ class KPKG(Configurator, Utilities):
 
 def _get_version() -> str:
     try:
-        return _pkg_version("kpkg")
+        return _pkg_version("irupkg")
     except Exception:
         return "unknown"
 
 
 def _resolve_parent_dir() -> Path:
-    """Resolve the kpkg config/data directory from environment variables or platform defaults."""
+    """Resolve the irupkg config/data directory from environment variables or platform defaults.
+
+    Resolution order: IRUPKG_LOCAL_DIR --> KPKG_LOCAL_DIR --> IRUPKG_CONFIG_DIR --> KPKG_CONFIG_DIR -->
+    platform default. Emits one deprecation warning per process when a KPKG_* env var or legacy
+    data directory is used.
+    """
+    global _warned_legacy
+
+    if os.environ.get("IRUPKG_LOCAL_DIR"):
+        return Path(os.environ["IRUPKG_LOCAL_DIR"])
+
     if os.environ.get("KPKG_LOCAL_DIR"):
+        if not _warned_legacy:
+            _warned_legacy = True
+            print("WARNING: KPKG_LOCAL_DIR is deprecated, use IRUPKG_LOCAL_DIR instead", file=sys.stderr)
         return Path(os.environ["KPKG_LOCAL_DIR"])
+
+    if os.environ.get("IRUPKG_CONFIG_DIR"):
+        return Path(os.environ["IRUPKG_CONFIG_DIR"]).expanduser().resolve()
+
     if os.environ.get("KPKG_CONFIG_DIR"):
+        if not _warned_legacy:
+            _warned_legacy = True
+            print("WARNING: KPKG_CONFIG_DIR is deprecated, use IRUPKG_CONFIG_DIR instead", file=sys.stderr)
         return Path(os.environ["KPKG_CONFIG_DIR"]).expanduser().resolve()
+
     if platform.system() == "Darwin":
-        return Path.home() / "Library" / "KandjiPackages"
-    return Path(user_data_dir("kpkg", "Kandji"))
+        new_path = Path.home() / "Library" / "IruPackages"
+        old_path = Path.home() / "Library" / "KandjiPackages"
+        if new_path.exists():
+            return new_path
+        if old_path.exists():
+            try:
+                old_path.rename(new_path)
+                print(f"Migrated data directory from {old_path} to {new_path}.", file=sys.stderr)
+            except OSError:
+                if not _warned_legacy:
+                    _warned_legacy = True
+                    print(
+                        f"WARNING: data directory has moved from {old_path} to {new_path}. "
+                        "Move your files to the new location to silence this warning.",
+                        file=sys.stderr,
+                    )
+                return old_path
+        return new_path
+
+    # Legacy ~/Library/KandjiPackages only exists on macOS
+    new_path = Path(user_data_dir("irupkg", "Iru"))
+    old_path = Path(user_data_dir("kpkg", "Kandji"))
+    if new_path.exists() or not old_path.exists():
+        return new_path
+    if not _warned_legacy:
+        _warned_legacy = True
+        print(
+            f"WARNING: data directory has moved from {old_path} to {new_path}. "
+            "Move your files to the new location to silence this warning.",
+            file=sys.stderr,
+        )
+    return old_path
 
 
 def _process_one(
@@ -541,32 +602,32 @@ def _process_one(
     opts: PackageOptions,
     parent_dir: Path | None,
     source_label: str | None = None,
-) -> KpkgResult:
-    """Construct a KPKG instance for a single local artifact and run it.
+) -> IrupkgResult:
+    """Construct an irupkg instance for a single local artifact and run it.
 
     `source_label` overrides the result's `source` field (used by process_brew
     to report the original cask name rather than the downloaded file path).
     """
     resolved_parent = parent_dir if parent_dir is not None else _resolve_parent_dir()
     try:
-        kpkg = KPKG(path_to_pkg=path, opts=opts, parent_dir=resolved_parent)
-    except KpkgError as exc:
-        return KpkgResult(source=source_label or path, action="failed", error=str(exc))
-    result = kpkg.main()
+        irupkg = Irupkg(path_to_pkg=path, opts=opts, parent_dir=resolved_parent)
+    except IrupkgError as exc:
+        return IrupkgResult(source=source_label or path, action="failed", error=str(exc))
+    result = irupkg.main()
     if source_label is not None:
         result.source = source_label
     return result
 
 
 def _configure_logging(debug: bool = False) -> None:
-    """Attach the kpkg file + stream handlers to the root logger if it has
+    """Attach the irupkg log file + stream handlers to the root logger if it has
     none yet. Shared by the CLI and the library entry points so REPL callers
     see the same INFO output the CLI does without configuring logging
     themselves. No-op when handlers are already attached."""
     if logging.getLogger().handlers:
         return
     hostname = platform.node()
-    path_to_log = str(_resolve_parent_dir() / "kpkg.log")
+    path_to_log = str(_resolve_parent_dir() / "irupkg.log")
     os.makedirs(os.path.dirname(path_to_log), exist_ok=True)
     logging.basicConfig(
         level=logging.DEBUG if debug else logging.INFO,
@@ -589,11 +650,11 @@ def process_pkg(
     unzip_location: str | None = None,
     parent_dir: Path | None = None,
     debug: bool = False,
-) -> KpkgResult:
-    """Upload a local PKG/DMG/ZIP to Kandji as a Custom App.
+) -> IrupkgResult:
+    """Upload a local PKG/DMG/ZIP to Iru as a Custom App.
 
-    Mirrors the behaviour of `kpkg -p <path>` for a single artifact and returns
-    a KpkgResult instead of logging-only output. Failures are captured in the
+    Mirrors the behaviour of `irupkg -p <path>` for a single artifact and returns
+    an IrupkgResult instead of logging-only output. Failures are captured in the
     result (action="failed") rather than raised.
 
     Logging: initializes the root logger at INFO (or DEBUG when `debug=True`)
@@ -625,11 +686,11 @@ def process_brew(
     unzip_location: str | None = None,
     parent_dir: Path | None = None,
     debug: bool = False,
-) -> KpkgResult:
-    """Fetch a Homebrew cask and upload the resulting artifact to Kandji.
+) -> IrupkgResult:
+    """Fetch a Homebrew cask and upload the resulting artifact to Iru.
 
-    Mirrors the behaviour of `kpkg -b <cask>` for a single cask and returns a
-    KpkgResult. If the cask cannot be fetched the result is marked failed.
+    Mirrors the behaviour of `irupkg -b <cask>` for a single cask and returns an
+    IrupkgResult. If the cask cannot be fetched the result is marked failed.
 
     Logging: initializes the root logger at INFO (or DEBUG when `debug=True`)
     if no handlers are attached yet. Callers that have already configured
@@ -638,7 +699,7 @@ def process_brew(
     _configure_logging(debug=debug)
     downloaded = source_from_brew(cask)
     if downloaded is None:
-        return KpkgResult(source=cask, action="failed", error=f"Failed to fetch Homebrew cask '{cask}'")
+        return IrupkgResult(source=cask, action="failed", error=f"Failed to fetch Homebrew cask '{cask}'")
     opts = PackageOptions(
         name=name,
         testname=testname,
@@ -656,12 +717,12 @@ def run_setup(target_dir: Path) -> None:
     macOS callers hand off to setup.zsh (which owns Keychain storage); this
     function is only reached when setup.zsh isn't present, so ENV storage
     is the only supported keystore here."""
-    print("\nkpkg interactive setup\n")
+    print("\nirupkg interactive setup\n")
     target_dir.mkdir(parents=True, exist_ok=True)
     config_path = target_dir / "config.json"
 
-    api_url = input("Kandji API URL (e.g., tenant.api.kandji.io): ").strip()
-    token_name = input("Kandji API token name [KANDJI_TOKEN]: ").strip() or "KANDJI_TOKEN"
+    api_url = input("Iru API URL (e.g., tenant.api.iru.com): ").strip()
+    token_name = input("Iru API token name [IRUPKG_TOKEN]: ").strip() or "IRUPKG_TOKEN"
 
     # Load existing config if present so we don't clobber unrelated fields
     existing = {}
@@ -673,7 +734,7 @@ def run_setup(target_dir: Path) -> None:
                 pass
 
     config = {**build_default_config(api_url, token_name, use_env=True, use_keychain=False), **existing}
-    config["kandji"] = {"api_url": api_url, "token_name": token_name}
+    config["iru"] = {"api_url": api_url, "token_name": token_name}
     config["token_keystore"] = {"environment": True, "keychain": False}
 
     with open(config_path, "w") as f:
@@ -681,36 +742,36 @@ def run_setup(target_dir: Path) -> None:
 
     print(f"\nConfig written to: {config_path}")
     env_path = target_dir / ".env"
-    print("\nSet your token environment variable(s) before running kpkg:")
+    print("\nSet your token environment variable(s) before running irupkg:")
     print(f"  echo 'export {token_name}=\"\"' >> {env_path}")
     print(f"  echo 'export SLACK_TOKEN=\"\"' >> {env_path}   # optional")
     print(f"  source {env_path}")
 
 
 def _run(argv: list[str] | None = None) -> None:
-    """Core entry-point logic. Raises KpkgError for expected error conditions.
+    """Core entry-point logic. Raises IrupkgError for expected error conditions.
     When argv is None, sys.argv is used (normal CLI behavior). Pass a list of
-    strings to drive kpkg programmatically, e.g. _run(['-p', 'app.pkg', '-y'])."""
+    strings to drive irupkg programmatically, e.g. _run(['-p', 'app.pkg', '-y'])."""
     _SETUP_FLAGS = {"-S", "--setup"}
-    _KPKG_OWN_FLAGS = {"-d", "--debug"}
+    _IRUPKG_OWN_FLAGS = {"-d", "--debug"}
     raw = list(argv) if argv is not None else sys.argv[1:]
     setup_mode = bool(_SETUP_FLAGS & set(raw))
 
     if setup_mode:
-        # Pre-scan raw args: extract kpkg-only flags, forward everything else to setup.zsh.
-        # This avoids argparse consuming flags shared between kpkg and setup.zsh (e.g. -h, -b, -c).
-        debug = bool(_KPKG_OWN_FLAGS & set(raw))
-        setup_args = [a for a in raw if a not in _SETUP_FLAGS | _KPKG_OWN_FLAGS]
+        # Pre-scan raw args: extract irupkg-only flags, forward everything else to setup.zsh.
+        # This avoids argparse consuming flags shared between irupkg and setup.zsh (e.g. -h, -b, -c).
+        debug = bool(_IRUPKG_OWN_FLAGS & set(raw))
+        setup_args = [a for a in raw if a not in _SETUP_FLAGS | _IRUPKG_OWN_FLAGS]
         args = None
     else:
         args, unknown = _build_parser().parse_known_args(argv)
         if unknown:
-            raise KpkgError(f"Unrecognized arguments: {' '.join(unknown)}")
+            raise IrupkgError(f"Unrecognized arguments: {' '.join(unknown)}")
         debug = args.debug
         setup_args = []
 
     if os.geteuid() == 0 and not env_keystore_enabled():
-        raise KpkgError("kpkg should NOT be run as superuser!")
+        raise IrupkgError("irupkg should NOT be run as superuser!")
 
     _configure_logging(debug=debug)
 
@@ -719,14 +780,13 @@ def _run(argv: list[str] | None = None) -> None:
     if setup_mode:
         if platform.system() == "Darwin":
             macos_setup = parent_dir / "setup.zsh"
-            if not macos_setup.exists():
-                try:
-                    packaged = importlib.resources.files("kpkg.scripts").joinpath("setup.zsh")
-                    with importlib.resources.as_file(packaged) as src:
-                        parent_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.copy(src, macos_setup)
-                except (FileNotFoundError, ModuleNotFoundError):
-                    pass
+            try:
+                packaged = importlib.resources.files("irupkg.scripts").joinpath("setup.zsh")
+                with importlib.resources.as_file(packaged) as src:
+                    parent_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copy(src, macos_setup)
+            except (FileNotFoundError, ModuleNotFoundError):
+                pass
             if macos_setup.exists():
                 # setup.zsh reads/writes config.json via plutil; seed a default skeleton on first
                 # run so the interactive prompts have a file to populate instead of stderr-spamming.
@@ -735,8 +795,8 @@ def _run(argv: list[str] | None = None) -> None:
                     with open(config_path, "w") as f:
                         json.dump(
                             build_default_config(
-                                "TENANT.api.kandji.io",
-                                "KANDJI_TOKEN",
+                                "TENANT.api.iru.com",
+                                "IRUPKG_TOKEN",
                                 use_env=False,
                                 use_keychain=False,
                             ),
@@ -744,6 +804,17 @@ def _run(argv: list[str] | None = None) -> None:
                             indent=2,
                             sort_keys=True,
                         )
+                else:
+                    try:
+                        with open(config_path) as f:
+                            config_data = json.load(f)
+                        if "kandji" in config_data and "iru" not in config_data:
+                            config_data["iru"] = config_data.pop("kandji")
+                            with open(config_path, "w") as f:
+                                json.dump(config_data, f, indent=2, sort_keys=True)
+                            print("Migrated config.json key 'kandji' to 'iru'.", file=sys.stderr)
+                    except (OSError, ValueError):
+                        pass
                 subprocess.run(["/bin/zsh", str(macos_setup), *setup_args], check=False)
                 return
         run_setup(parent_dir)
@@ -752,11 +823,11 @@ def _run(argv: list[str] | None = None) -> None:
     vers = _get_version()
 
     if args.version:
-        print(f"Kandji Packages: {vers}")
+        print(f"{CLI_BRANDING}: {vers}")
         return
 
     if args.pkg is None and args.brew is None:
-        raise KpkgError("No PKG/DMG path or Homebrew cask provided (use flag -p/--pkg or -b/--brew)")
+        raise IrupkgError("No PKG/DMG path or Homebrew cask provided (use flag -p/--pkg or -b/--brew)")
 
     # Pair each resolved local path with the label used for logs/results
     # (the cask name for brew inputs, the path itself for direct -p inputs).
@@ -770,12 +841,12 @@ def _run(argv: list[str] | None = None) -> None:
                 items.append((downloaded_brew, brew))
 
     if len(items) > 1 and any((args.name, args.testname, args.sscategory, args.zzcategory)):
-        raise KpkgError(
+        raise IrupkgError(
             "Multiple brew casks/installers provided, but flags passed for name/category are ambiguous -- "
             "use package map or defaults to populate metadata when specifying multiple items"
         )
 
-    log.info(format_stdout(f"Kandji Packages ({vers})"))
+    log.info(format_stdout(f"{CLI_BRANDING} ({vers})"))
 
     opts = PackageOptions(
         name=args.name,
@@ -794,16 +865,16 @@ def _run(argv: list[str] | None = None) -> None:
         if result.action == "failed":
             any_failed = True
             log.error(f"Failed to process '{label or os.path.basename(path)}': {result.error}")
-    log.info(format_stdout("Kandji Packages Runtime Complete"))
+    log.info(format_stdout(f"{CLI_BRANDING} Runtime Complete"))
     if any_failed:
         sys.exit(1)
 
 
 def main() -> None:
-    """CLI entry point. Not intended for programmatic use -- construct KPKG directly instead."""
+    """CLI entry point. Not intended for programmatic use -- construct irupkg directly instead."""
     try:
         _run()
-    except KpkgError as e:
+    except IrupkgError as e:
         log.fatal(str(e))
         sys.exit(1)
 

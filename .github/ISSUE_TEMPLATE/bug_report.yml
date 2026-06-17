@@ -6,7 +6,7 @@ labels:
 body:
   - type: markdown
     attributes:
-      value: "## Report issues with Kandji's standalone tool, kpkg"
+      value: "## Report issues with Iru's standalone tool, irupkg"
   - type: checkboxes
     id: nodupes
     attributes:
@@ -32,7 +32,7 @@ body:
       label: Reproduce
       description: Steps to reproduce the issue
       placeholder: |
-        kpkg -p /path/to/installer.dmg -n "NAME" -d ...
+        irupkg -p /path/to/installer.dmg -n "NAME" -d ...
     validations:
       required: true
   - type: textarea
@@ -47,23 +47,23 @@ body:
   - type: textarea
     id: response
     attributes:
-      label: kpkg response
-      description: Output of the `kpkg` command containing the error/exception (redacting sensitive information)
+      label: irupkg response
+      description: Output of the `irupkg` command containing the error/exception (redacting sensitive information)
       render: python
       placeholder: |
         Traceback (most recent call last):
-          File "kpkg", line 1, in <module>
-          File "kpkg.py", line 1, in <module>
-          File "kpkg.py", line 1, in <module>
-        ImportError: cannot import name 'kpkg'
+          File "irupkg", line 1, in <module>
+          File "irupkg.py", line 1, in <module>
+          File "irupkg.py", line 1, in <module>
+        ImportError: cannot import name 'irupkg'
     validations:
       required: true
   - type: input
-    id: kpkgvers
+    id: irupkgvers
     attributes:
-      label: kpkg version
-      description: Output of `kpkg --version`
-      placeholder: "Kandji Packages: 2.0.0"
+      label: irupkg version
+      description: Output of `irupkg --version`
+      placeholder: "Iru Packages: 2.1.0"
     validations:
       required: true
   - type: textarea

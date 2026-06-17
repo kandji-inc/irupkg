@@ -1,31 +1,31 @@
 {
-  "kandji" : {
-    "api_url" : "TENANT.api.kandji.io",
-    "token_name" : "KANDJI_TOKEN"
+  "iru": {
+    "api_url": "TENANT.api.iru.com",
+    "token_name": "IRUPKG_TOKEN"
   },
-  "li_enforcement" : {
-    "delays" : {
-      "prod" : 5,
-      "test" : 0
+  "li_enforcement": {
+    "delays": {
+      "prod": 5,
+      "test": 0
     },
-    "type" : "audit_enforce"
+    "type": "audit_enforce"
   },
-  "slack" : {
-    "enabled" : true,
-    "webhook_name" : "SLACK_TOKEN"
+  "slack": {
+    "enabled": true,
+    "webhook_name": "SLACK_TOKEN"
   },
-  "token_keystore" : {
-    "environment" : false,
-    "keychain" : false
+  "token_keystore": {
+    "environment": false,
+    "keychain": false
   },
-  "use_package_map" : false,
-  "zz_defaults" : {
-    "auto_create_app" : true,
-    "dry_run" : false,
-    "dynamic_lookup" : false,
-    "new_app_naming" : "APPNAME (kpkg)",
-    "self_service_category" : "Apps",
-    "test_self_service_category" : "Utilities",
+  "use_package_map": false,
+  "zz_defaults": {
+    "auto_create_app": true,
+    "dry_run": false,
+    "dynamic_lookup": false,
+    "new_app_naming": "APPNAME (irupkg)",
+    "self_service_category": "Apps",
+    "test_self_service_category": "Utilities",
     "unzip_location": "/Applications"
   }
 }

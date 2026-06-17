@@ -1,6 +1,6 @@
 #!/bin/zsh -f
 #
-# Audit script used to enforce Kandji custom app; programmatically populated during kpkg runtime
+# Audit script used to enforce Iru custom app; programmatically populated during irupkg runtime
 # Searches for install via populated bundle identifier/app name or from receipt DB given package ID
 # If not found, immediately triggers custom app installation (regardless of any configured delays)
 # If found, determines if version enforcement due; if so, triggers install if installed < required
@@ -31,7 +31,7 @@ ENFORCEMENT_TIMESTAMP=$((${CREATION_TIMESTAMP}+(${DAYS_UNTIL_ENFORCEMENT}*24*60*
 # Enforcement due datetime
 ENFORCEMENT_DATETIME=$(date -r ${ENFORCEMENT_TIMESTAMP} +'%Y-%m-%d %H:%M:%S %Z')
 # Enforcement delay plist
-ENFORCEMENT_DELAY_PLIST="/Library/Preferences/io.kandji.enforcement.delay.plist"
+ENFORCEMENT_DELAY_PLIST="/Library/Preferences/com.iru.irupkg.enforcement.delay.plist"
 
 ##############################
 ########## FUNCTIONS #########
@@ -215,8 +215,8 @@ function check_blocking_proc() {
     # Locate app icon and assign backups if not found
     icon_path=$(find "${ls_bundle_path}" -depth 3 -name "${ls_icon_file}" | head -1)
     if [[ -z ${icon_path} ]]; then
-        # Use Kandji Self Service icon as first fallback
-        icon_path=$(find "/Applications/Kandji Self Service.app" -depth 3 -name "AppIcon.icns" | head -1)
+        # Use Iru Self Service icon as first fallback
+        icon_path=$(find "/Applications/Iru Self Service.app" -depth 3 -name "AppIcon.icns" | head -1)
         # If not found, use Installer icon as final fallback
         icon_path=${icon_path:-"/System/Library/CoreServices/Installer.app/Contents/Resources/AppIcon.icns"}
     fi

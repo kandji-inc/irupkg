@@ -35,6 +35,7 @@ import platform
 import plistlib
 import re
 import sys
+from urllib.parse import urlparse
 
 import requests
 
@@ -46,12 +47,35 @@ from .utils import HTTP_TIMEOUT, env_keystore_enabled
 
 log = logging.getLogger(__name__)
 
+_warned_deprecated: set[str] = set()
+
+
+def _deprecated_env(old_name: str, new_name: str | None = None) -> str:
+    """Return the value of a deprecated env var, emitting a one-time warning to stderr."""
+    val = os.environ.get(old_name, "")
+    if val and old_name not in _warned_deprecated:
+        _warned_deprecated.add(old_name)
+        resolved = new_name if new_name is not None else old_name.replace("KANDJI_", "IRU_", 1)
+        print(f"WARNING: {old_name} is deprecated, use {resolved} instead", file=sys.stderr)
+    return val
+
+
+def _deprecated_config_key(old_key: str, new_key: str) -> None:
+    """Emit a one-time warning that a config.json top-level key has been renamed."""
+    sentinel = f"config:{old_key}"
+    if sentinel not in _warned_deprecated:
+        _warned_deprecated.add(sentinel)
+        print(
+            f"WARNING: config.json key '{old_key}' is deprecated, rename to '{new_key}'. Run 'irupkg --setup' to migrate automatically.",
+            file=sys.stderr,
+        )
+
 
 def build_default_config(api_url: str, token_name: str, use_env: bool = True, use_keychain: bool = False) -> dict:
-    """Return a minimal valid kpkg config dict with sensible defaults.
+    """Return a minimal valid irupkg config dict with sensible defaults.
     Single source of truth shared by _read_config() and run_setup()."""
     return {
-        "kandji": {"api_url": api_url, "token_name": token_name},
+        "iru": {"api_url": api_url, "token_name": token_name},
         "token_keystore": {"environment": use_env, "keychain": use_keychain},
         "li_enforcement": {"delays": {"prod": 5, "test": 0}, "type": "audit_enforce"},
         "slack": {"enabled": False, "webhook_name": "SLACK_TOKEN"},
@@ -60,7 +84,7 @@ def build_default_config(api_url: str, token_name: str, use_env: bool = True, us
             "auto_create_app": True,
             "dry_run": False,
             "dynamic_lookup": False,
-            "new_app_naming": "APPNAME (kpkg)",
+            "new_app_naming": "APPNAME (irupkg)",
             "self_service_category": "Apps",
             "test_self_service_category": "Utilities",
             "unzip_location": "/Applications",
@@ -92,33 +116,41 @@ class Configurator:
                 return False
         return parsed_enforcer
 
-    def _read_config(self, kandji_conf):
+    def _read_config(self, iru_conf):
         """Read in configuration from defined conf path
         Building out full path to read and load as JSON data
         Return loaded JSON data once existence and validity are confirmed"""
         # Have to derive path this way in order to get the execution file origin
-        kandji_conf_path = os.path.join(self.parent_dir, kandji_conf)
-        if not os.path.exists(kandji_conf_path):
-            api_url = os.environ.get("KANDJI_API_URL", "")
+        config_path = os.path.join(self.parent_dir, iru_conf)
+        if not os.path.exists(config_path):
+            api_url = os.environ.get("IRU_API_URL") or _deprecated_env("KANDJI_API_URL")
             if not api_url:
                 log.fatal(
-                    f"kpkg config not found at '{kandji_conf_path}'! "
-                    "Run 'kpkg --setup' to generate it, or set KANDJI_API_URL and KANDJI_TOKEN in the environment and try again"
+                    f"irupkg config not found at '{config_path}'! "
+                    "Run 'irupkg --setup' to generate it, or set IRU_API_URL and IRUPKG_TOKEN in the environment and try again"
                 )
                 sys.exit(1)
-            token_name = os.environ.get("KANDJI_TOKEN_NAME", "KANDJI_TOKEN")
+            token_name = (
+                os.environ.get("IRUPKG_TOKEN_NAME")
+                or _deprecated_env("KANDJI_TOKEN_NAME", "IRUPKG_TOKEN_NAME")
+                or (
+                    "KANDJI_TOKEN"
+                    if (not os.environ.get("IRUPKG_TOKEN") and _deprecated_env("KANDJI_TOKEN", "IRUPKG_TOKEN"))
+                    else "IRUPKG_TOKEN"
+                )
+            )
             auto_config = build_default_config(api_url, token_name)
-            os.makedirs(os.path.dirname(kandji_conf_path), exist_ok=True)
-            with open(kandji_conf_path, "w") as f:
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w") as f:
                 json.dump(auto_config, f, indent=2, sort_keys=True)
-            log.info(f"Auto-generated config at '{kandji_conf_path}' from environment variables")
+            log.info(f"Auto-generated config at '{config_path}' from environment variables")
             return auto_config
         try:
-            with open(kandji_conf_path) as f:
+            with open(config_path) as f:
                 custom_config = json.loads(f.read())
         except ValueError as ve:
             log.fatal(
-                f"Config at '{kandji_conf_path}' is not valid JSON!\n{ve} -- validate file integrity for '{kandji_conf}' and try again"
+                f"Config at '{config_path}' is not valid JSON!\n{ve} -- validate file integrity for '{iru_conf}' and try again"
             )
             sys.exit(1)
         return custom_config
@@ -134,7 +166,7 @@ class Configurator:
         self.package_map = None
         self.app_names = {}
         self.map_unzip_location = None
-        if self.kpkg_config.get("use_package_map") is True:
+        if self.iru_config.get("use_package_map") is True:
             self.package_map = self._read_config(self.package_map_file)
             if self.package_map is False:
                 log.error("Package map is enabled, but config is invalid!")
@@ -168,7 +200,7 @@ class Configurator:
     def _set_defaults_enforcements(self):
         """Reads JSON config and sets enforcement based on
         defined value, otherwise defaults to install once"""
-        if (default_vals := self.kpkg_config.get("zz_defaults")) is not None:
+        if (default_vals := self.iru_config.get("zz_defaults")) is not None:
             self.default_auto_create = default_vals.get("auto_create_app")
             self.default_custom_name = default_vals.get("new_app_naming")
             self.default_dry_run = default_vals.get("dry_run")
@@ -177,7 +209,7 @@ class Configurator:
             self.test_default_ss_category = default_vals.get("test_self_service_category")
             self.default_unzip_location = default_vals.get("unzip_location", "/Applications")
 
-        config_enforcement = self.kpkg_config.get("li_enforcement")
+        config_enforcement = self.iru_config.get("li_enforcement")
         enforcement_type = self._parse_enforcement(config_enforcement.get("type"))
         # Check if enforcement type specified, else default to once
         # May be overridden later based on recipe-specific mappings
@@ -224,16 +256,16 @@ class Configurator:
                 self.custom_app_name = self.assigned_name
             elif self.default_custom_name is not None:
                 self.custom_app_name = self.default_custom_name.replace("APPNAME", self.derived_name)
-            # All else fails, assign as 'derived name (kpkg)'
+            # All else fails, assign as 'derived name (irupkg)'
             else:
-                self.custom_app_name = f"{self.derived_name} (kpkg)"
+                self.custom_app_name = f"{self.derived_name} (irupkg)"
             self.app_names["undefined"] = self.custom_app_name
 
     def _populate_self_service(self):
         def get_self_service():
-            """Queries all Self Service categories from Kandji tenant; assigns GET URL to var for cURL execution
+            """Queries all Self Service categories from Iru tenant; assigns GET URL to var for cURL execution
             Runs command and validates output when returning self._validate_response()"""
-            get_url = f"{self.kandji_api_prefix}/self-service/categories"
+            get_url = f"{self.iru_api_prefix}/self-service/categories"
             response = requests.get(url=get_url, headers=self.auth_headers, timeout=HTTP_TIMEOUT)
             return self._validate_response(response, "get_selfservice")
 
@@ -298,67 +330,102 @@ class Configurator:
         """Checks if Slack token name is in config
         Looks up webhook and assigns for use in self.slack_notify()"""
 
-        slack_token_name = self.kandji_slack_opts.get("webhook_name", "SLACK_TOKEN")
+        slack_token_name = self.slack_opts.get("webhook_name", "SLACK_TOKEN")
         # Auto-enable Slack when the webhook token is present in ENV (mirrors ENV_KEYSTORE behaviour)
-        if not self.kandji_slack_opts.get("enabled") and self.token_keystores.get("environment"):
+        if not self.slack_opts.get("enabled") and self.token_keystores.get("environment"):
             if os.environ.get(slack_token_name) or os.environ.get(slack_token_name.upper()):
-                self.kandji_slack_opts["enabled"] = True
-        self.slack_channel = self._retrieve_token(slack_token_name) if self.kandji_slack_opts.get("enabled") else None
+                self.slack_opts["enabled"] = True
+        self.slack_channel = self._retrieve_token(slack_token_name) if self.slack_opts.get("enabled") else None
 
-    def _set_kandji_config(self):
-        """Validates provided Kandji API URL is valid for use
+    def _set_iru_config(self):
+        """Validates provided Iru API URL is valid for use
         Assigns prefix used for API calls + bearer token"""
 
-        # Ensure Kandji API URL is prefixed with https://
-        self.kandji_api_url = self._ensure_https(self.kandji_api_url)
+        # Ensure API URL is prefixed with https://
+        self.iru_api_url = self._ensure_https(self.iru_api_url)
         self.headers = {"Content-Type": "application/json"}
-        # Confirm provided Kandji URL is valid
-        migration_check_url = self.kandji_api_url.replace(
-            "api.kandji.io",
-            "gateway.kandji.io/main-backend/app/v1/company/auth-migration-status",
-        )
-        try:
-            response = requests.get(url=migration_check_url, headers=self.headers, timeout=HTTP_TIMEOUT)
-            migration_data = response.json()
-        except (requests.RequestException, ValueError):
-            migration_data = {}
 
-        # Match the structured error code rather than a substring of stringified values;
-        # otherwise a proxy error page or unrelated field that mentions "tenantNotFound"
-        # hard-exits the process.
-        if migration_data.get("error") == "tenantNotFound" or migration_data.get("code") == "tenantNotFound":
-            log.fatal(f"ERROR: Provided Kandji URL {self.kandji_api_url} appears invalid! Cannot upload...")
-            sys.exit(1)
-
-        # Assign tenant URL based on migration status
-        if migration_data.get("auth_migration_status") in ("STARTED", "COMPLETED"):
-            self.tenant_url = self.kandji_api_url.replace(".api.kandji.io", ".iru.com")
+        iru_host = (urlparse(self.iru_api_url).hostname or "").lower()
+        if iru_host == "iru.com" or iru_host.endswith(".iru.com"):
+            # iru.com serves every tenant's console from TENANT.iru.com regardless of region,
+            # so drop the ".api" label *and* any ".eu" locale (no migration check needed).
+            self.tenant_url = self.iru_api_url.replace(".api.eu.", ".").replace(".api.", ".")
         else:
-            self.tenant_url = self.kandji_api_url.replace(".api.", ".")
-        # Assign API domain
-        self.kandji_api_prefix = os.path.join(self.kandji_api_url, "api", "v1")
-        # Define API endpoints
-        self.api_custom_apps_url = os.path.join(self.kandji_api_prefix, "library", "custom-apps")
-        self.api_upload_pkg_url = os.path.join(self.api_custom_apps_url, "upload")
-        self.api_self_service_url = os.path.join(self.kandji_api_prefix, "self-service", "categories")
+            # kandji.io stays valid even after a tenant migrates, so the console can live on
+            # either domain -- check migration status to point console/library links at the right
+            # one. Swapping ".api." --> ".gateway." preserves locale so US and EU hit different
+            # hosts (TENANT.gateway.kandji.io vs TENANT.gateway.eu.kandji.io).
+            migration_check_url = (
+                self.iru_api_url.replace(".api.", ".gateway.") + "/main-backend/app/v1/company/auth-migration-status"
+            )
+            try:
+                response = requests.get(url=migration_check_url, headers=self.headers, timeout=HTTP_TIMEOUT)
+                migration_data = response.json()
+                migration_status_known = True
+            except (requests.RequestException, ValueError):
+                migration_data = {}
+                migration_status_known = False
 
-        # Grab auth token for Kandji API interactions
-        kandji_token = self._retrieve_token(self.kandji_token_name)
-        if kandji_token is None:
+            # Match the structured error code rather than a substring of stringified values;
+            # otherwise a proxy error page or unrelated field that mentions "tenantNotFound"
+            # hard-exits the process.
+            if migration_data.get("error") == "tenantNotFound" or migration_data.get("code") == "tenantNotFound":
+                log.fatal(f"ERROR: Provided Iru URL {self.iru_api_url} appears invalid! Cannot upload...")
+                sys.exit(1)
+
+            if migration_data.get("auth_migration_status") in ("STARTED", "COMPLETED"):
+                # Migrated: console moved to the region-agnostic iru.com host (collapses any
+                # ".eu" locale). Nudge the user to update their API URL to iru.com.
+                self.tenant_url = (
+                    self.iru_api_url.replace(".api.", ".")
+                    .replace(".eu.kandji.io", ".kandji.io")
+                    .replace(".kandji.io", ".iru.com")
+                )
+                log.warning(
+                    f"API URL '{self.iru_api_url}' uses the deprecated kandji.io host. Switch 'iru.api_url' to "
+                    "'TENANT.api.iru.com' ('TENANT.api.eu.iru.com' for EU tenants) in config.json, or "
+                    "re-run 'irupkg --setup'. kandji.io support will be removed in a future major version."
+                )
+            else:
+                # Unmigrated OR undetermined: console stays on the region-specific kandji.io host,
+                # so keep any ".eu" locale and just drop ".api".
+                self.tenant_url = self.iru_api_url.replace(".api.", ".")
+                if migration_status_known:
+                    log.info(
+                        f"API URL '{self.iru_api_url}' uses the kandji.io host, which is correct for this "
+                        "not-yet-migrated tenant. kandji.io support will be removed in a future major "
+                        "version; switch to 'TENANT.api.iru.com' once your tenant migrates to Iru."
+                    )
+                else:
+                    log.info(
+                        f"Could not determine migration status for '{self.iru_api_url}' (gateway unreachable); "
+                        "defaulting console/library links to the kandji.io host. If this tenant has already "
+                        "migrated to Iru, those links may be stale, but should redirect to your Iru tenant."
+                    )
+        # Assign API domain
+        self.iru_api_prefix = os.path.join(self.iru_api_url, "api", "v1")
+        # Define API endpoints
+        self.api_custom_apps_url = os.path.join(self.iru_api_prefix, "library", "custom-apps")
+        self.api_upload_pkg_url = os.path.join(self.api_custom_apps_url, "upload")
+        self.api_self_service_url = os.path.join(self.iru_api_prefix, "self-service", "categories")
+
+        # Grab auth token for Iru API interactions
+        irupkg_token = self._retrieve_token(self.irupkg_token_name)
+        if irupkg_token is None:
             log.fatal(
-                f"ERROR: Could not retrieve token value from key {self.kandji_token_name}! Run 'kpkg --setup' and try again"
+                f"ERROR: Could not retrieve token value from key {self.irupkg_token_name}! Run 'irupkg --setup' and try again"
             )
             sys.exit(1)
         # Set headers/params for API calls. Cache-Control hints discourage any
         # intermediate CDN/proxy from returning a stale custom-app record after
-        # we PATCH it -- observed read-after-write inconsistency from Kandji.
+        # we PATCH it -- observed read-after-write inconsistency from Iru.
         self.auth_headers = {
-            "Authorization": f"Bearer {kandji_token}",
+            "Authorization": f"Bearer {irupkg_token}",
             "Content-Type": "application/json",
             "Cache-Control": "no-cache",
             "Pragma": "no-cache",
         }
-        self.params = {"source": "kpkg"}
+        self.params = {"source": "irupkg"}
 
     ####################################
     ######### PUBLIC FUNCTIONS #########
@@ -482,27 +549,33 @@ class Configurator:
         # Temp dir/path for PKG/DMG expansion to be overwritten later
         self.temp_dir, self.tmp_pkg_path, self.tmp_dmg_mount = None, None, None
         # Populate config
-        self.kpkg_config = self._read_config(self.config_file)
-        if self.kpkg_config is False:
+        self.iru_config = self._read_config(self.config_file)
+        if self.iru_config is False:
             raise Exception("ERROR: Config is invalid! Confirm file integrity and try again")
         try:
-            kandji_conf = self.kpkg_config["kandji"]
-            self.kandji_api_url = kandji_conf["api_url"]
-            self.kandji_token_name = kandji_conf["token_name"]
-            self.token_keystores = self.kpkg_config["token_keystore"]
-            # Overwrite Kandji API URL from ENV or keep as set in config
-            self.kandji_api_url = os.environ.get("KANDJI_API_URL", self.kandji_api_url)
+            if "iru" in self.iru_config:
+                iru_conf = self.iru_config["iru"]
+            elif "kandji" in self.iru_config:
+                _deprecated_config_key("kandji", "iru")
+                iru_conf = self.iru_config["kandji"]
+            else:
+                raise KeyError("config.json missing 'iru' (or legacy 'kandji') section")
+            self.iru_api_url = iru_conf["api_url"]
+            self.irupkg_token_name = iru_conf["token_name"]
+            self.token_keystores = self.iru_config["token_keystore"]
+            # Overwrite Iru API URL from ENV or keep as set in config
+            self.iru_api_url = os.environ.get("IRU_API_URL") or _deprecated_env("KANDJI_API_URL") or self.iru_api_url
             # Overwrite keystore conf from ENV if set
             if env_keystore_enabled():
                 self.token_keystores["environment"] = True
             # Sanity check values before continuing
-            if "TENANT" in self.kandji_api_url:
-                log.fatal("Kandji API URL is invalid! Run 'kpkg --setup' and try again")
+            if "TENANT" in self.iru_api_url:
+                log.fatal("Iru API URL is invalid! Run 'irupkg --setup' and try again")
                 sys.exit(1)
             if not any(self.token_keystores.values()) and platform.system() == "Darwin":
-                log.fatal("Token keystore is undefined! Run 'kpkg --setup' and try again")
+                log.fatal("Token keystore is undefined! Run 'irupkg --setup' and try again")
                 sys.exit(1)
-            self.kandji_slack_opts = self.kpkg_config["slack"]
+            self.slack_opts = self.iru_config["slack"]
         except KeyError as err:
             log.fatal(f"Required key(s) are undefined! {' '.join(err.args)}")
             sys.exit(1)
@@ -511,5 +584,5 @@ class Configurator:
         self._set_defaults_enforcements()
         self._set_custom_name()
         self._set_slack_config()
-        self._set_kandji_config()
+        self._set_iru_config()
         self._populate_self_service()

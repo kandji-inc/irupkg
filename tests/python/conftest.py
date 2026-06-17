@@ -2,8 +2,8 @@ import json
 
 import pytest
 import requests
-from kpkg.helpers.configs import Configurator
-from kpkg.helpers.utils import Utilities
+from irupkg.helpers.configs import Configurator
+from irupkg.helpers.utils import Utilities
 
 
 @pytest.fixture(autouse=True)
@@ -15,10 +15,12 @@ def block_http_requests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def isolate_kpkg_local_dir(tmp_path, monkeypatch):
-    """Redirect kpkg's parent_dir to tmp_path so logging.basicConfig() and
+def isolate_irupkg_local_dir(tmp_path, monkeypatch):
+    """Redirect irupkg's parent_dir to tmp_path so logging.basicConfig() and
     os.makedirs() in _run() don't touch the developer's $HOME during tests."""
-    monkeypatch.setenv("KPKG_LOCAL_DIR", str(tmp_path))
+    monkeypatch.setenv("IRUPKG_LOCAL_DIR", str(tmp_path))
+    import irupkg.irupkg as _irupkg_mod
+    monkeypatch.setattr(_irupkg_mod, "_warned_legacy", False)
 
 
 @pytest.fixture
