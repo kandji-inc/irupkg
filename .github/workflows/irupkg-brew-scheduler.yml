@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: arc-scale-set-sddx-small
     defaults:
       run:
         working-directory: irupkg
