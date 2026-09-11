@@ -51,7 +51,7 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: arc-scale-set-sddx-small
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: irupkg
